@@ -11,8 +11,30 @@ const config = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
-export const firebaseReady = Object.values(config).every(Boolean);
-export const firebaseApp = firebaseReady ? initializeApp(config) : null;
-export const auth = firebaseApp ? getAuth(firebaseApp) : null;
-export const db = firebaseApp ? getFirestore(firebaseApp) : null;
-export const storage = firebaseApp ? getStorage(firebaseApp) : null;
+const firebaseConfigured = Object.values(config).every(Boolean);
+
+let firebaseApp = null;
+let auth = null;
+let db = null;
+let storage = null;
+
+if (firebaseConfigured) {
+  try {
+    firebaseApp = initializeApp(config);
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+    storage = getStorage(firebaseApp);
+  } catch (error) {
+    console.error(
+      "Firebase could not initialize. iTest will open in demo mode.",
+      error?.code || "initialization-failed"
+    );
+    firebaseApp = null;
+    auth = null;
+    db = null;
+    storage = null;
+  }
+}
+
+export { firebaseApp, auth, db, storage };
+export const firebaseReady = Boolean(firebaseApp && auth && db && storage);
