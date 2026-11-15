@@ -55,7 +55,10 @@ export async function requireUser(request) {
       uid: payload.sub,
       email: typeof payload.email === "string" ? payload.email : "",
       name: typeof payload.name === "string" ? payload.name : "",
-      educator: payload.educator === true
+      emailVerified: payload.email_verified === true,
+      educator: payload.educator === true,
+      employer: payload.employer === true,
+      workspaceType: payload.employer === true ? "employer" : "educator"
     };
   } catch {
     const error = new Error("Your session has expired. Sign in again.");
@@ -64,10 +67,20 @@ export async function requireUser(request) {
   }
 }
 
+export async function requireVerifiedUser(request) {
+  const user = await requireUser(request);
+  if (!user.email || !user.emailVerified) {
+    const error = new Error("Verify the email address invited to this exam, then sign in again.");
+    error.status = 403;
+    throw error;
+  }
+  return user;
+}
+
 export async function requireEducator(request) {
   const user = await requireUser(request);
-  if (!user.educator) {
-    const error = new Error("This workspace is available to verified educators only.");
+  if (!user.educator && !user.employer) {
+    const error = new Error("This workspace is available to verified educators and hiring teams only.");
     error.status = 403;
     throw error;
   }

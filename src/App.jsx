@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import {
   createUserWithEmailAndPassword, GoogleAuthProvider, onAuthStateChanged, signOut as firebaseSignOut,
-  sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, updateProfile
+  sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, updateProfile
 } from "firebase/auth";
 import {
   addDoc, collection, deleteDoc, doc, onSnapshot, setDoc
@@ -19,12 +19,14 @@ import { auth, db, firebaseReady, storage } from "./lib/firebase.js";
 import { callAi } from "./lib/ai.js";
 import { extractDocumentText } from "./lib/documents.js";
 import EducatorWorkspace from "./EducatorWorkspace.jsx";
+import StudentWorkspace from "./StudentWorkspace.jsx";
 
 const DEMO_KEY = "itest-demo-v1";
 const NAV_ITEMS = [
   { id: "overview", label: "Overview", icon: Home },
   { id: "create", label: "Create an exam", icon: Sparkles },
   { id: "practice", label: "Exam room", icon: Timer },
+  { id: "assigned", label: "Assigned courses", icon: BookOpen },
   { id: "educator", label: "Educator workspace", icon: GraduationCap },
   { id: "study", label: "Study & research", icon: Lightbulb },
   { id: "library", label: "My documents", icon: Library }
@@ -108,6 +110,7 @@ function Landing({ onLogin, onDemo }) {
           <a href="#how-it-works">How it works</a>
           <a href="#for-teachers">For educators</a>
           <a href="#for-learners">For learners</a>
+          <a href="#for-employers">For hiring teams</a>
         </nav>
         <div className="landing-actions">
           <TranslateMenu landing />
@@ -157,8 +160,9 @@ function Landing({ onLogin, onDemo }) {
         </section>
 
         <section className="audience-section shell" id="for-teachers">
-          <div className="audience-panel educator-panel"><span className="eyebrow">FOR EDUCATORS</span><h2>Thoughtful exams,<br />without the busywork.</h2><p>Build a first draft from your own course materials. Adjust it, export it, and spend more time on the teaching.</p><button className="button button-light" onClick={onLogin}>Create an educator workspace <ArrowRight size={16} /></button><div className="panel-index">iTEST / 01</div></div>
-          <div className="audience-panel learner-panel" id="for-learners"><span className="eyebrow">FOR LEARNERS</span><h2>Practice until<br />it feels familiar.</h2><p>Use short, timed sessions to find what you know and what to study next.</p><button className="button button-outline-light" onClick={onDemo}>Try a sample session <ArrowRight size={16} /></button><div className="panel-index">iTEST / 02</div></div>
+          <div className="audience-panel educator-panel"><span className="eyebrow">FOR EDUCATORS</span><h2>Thoughtful exams,<br />without the busywork.</h2><p>Build exams from course materials, invite verified students, set a passing score, and follow every attempt.</p><button className="button button-light" onClick={onLogin}>Open educator workspace <ArrowRight size={16} /></button><div className="panel-index">iTEST / 01</div></div>
+          <div className="audience-panel learner-panel" id="for-learners"><span className="eyebrow">FOR STUDENTS</span><h2>Practice until<br />it feels familiar.</h2><p>Build your own courses and practice exams, then keep teacher-assigned work and every score in one place.</p><button className="button button-outline-light" onClick={onDemo}>Try a sample session <ArrowRight size={16} /></button><div className="panel-index">iTEST / 02</div></div>
+          <div className="audience-panel employer-panel" id="for-employers"><span className="eyebrow">FOR HR & HIRING TEAMS</span><h2>Assess skills.<br />Keep people in the loop.</h2><p>Create role-related assessments, set a benchmark, and review each candidate’s attempts as evidence for your hiring team.</p><button className="button button-outline" onClick={onLogin}>Open hiring workspace <ArrowRight size={16} /></button><div className="panel-index">iTEST / 03</div><span className="employer-human-review">Human review stays with your team.</span></div>
         </section>
 
         <section className="closing-cta shell"><div><span className="eyebrow">YOUR STUDY DESK, READY WHEN YOU ARE</span><h2>Start with what<br />you’re learning.</h2></div><button className="button button-dark button-large" onClick={onLogin}>Get started with iTest <ArrowUpRight size={17} /></button></section>
@@ -186,6 +190,8 @@ function AuthModal({ mode, setMode, onClose, onSignedIn, notify }) {
       if (mode === "signup") {
         credential = await createUserWithEmailAndPassword(auth, email, password);
         if (name.trim()) await updateProfile(credential.user, { displayName: name.trim() });
+        await sendEmailVerification(credential.user, { url: window.location.origin, handleCodeInApp: false });
+        notify("Account created. Verify your email to open assigned exams.", "info");
       } else {
         credential = await signInWithEmailAndPassword(auth, email, password);
       }
@@ -248,6 +254,7 @@ function App() {
   const [section, setSection] = useState("overview");
   const [user, setUser] = useState(null);
   const [isEducator, setIsEducator] = useState(false);
+  const [isEmployer, setIsEmployer] = useState(false);
   const [createReturnSection, setCreateReturnSection] = useState("practice");
   const [demo, setDemo] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
@@ -280,8 +287,10 @@ function App() {
         try {
           const tokenResult = await currentUser.getIdTokenResult(true);
           if (authUidRef.current === currentUser.uid) setIsEducator(tokenResult.claims.educator === true);
+          if (authUidRef.current === currentUser.uid) setIsEmployer(tokenResult.claims.employer === true);
         } catch {
           if (authUidRef.current === currentUser.uid) setIsEducator(false);
+          if (authUidRef.current === currentUser.uid) setIsEmployer(false);
         }
         setDemo(false);
         setScreen("dashboard");
@@ -294,6 +303,7 @@ function App() {
         }, { merge: true }).catch(() => {});
       } else {
         setIsEducator(false);
+        setIsEmployer(false);
         setDemo(false);
         setScreen("landing");
       }
@@ -362,6 +372,8 @@ function App() {
     if (user && auth) await firebaseSignOut(auth);
     setDemo(false);
     setUser(null);
+    setIsEducator(false);
+    setIsEmployer(false);
     setScreen("landing");
     setSection("overview");
   }
@@ -540,18 +552,23 @@ function App() {
   const displayName = user?.displayName || user?.email?.split("@")[0] || "Alex Morgan";
   const firstName = displayName.split(" ")[0];
   const matchingExams = exams.filter((exam) => `${exam.title || ""} ${exam.subject || ""}`.toLowerCase().includes(query.toLowerCase()));
-  const visibleNavItems = NAV_ITEMS.filter((item) => item.id !== "educator" || isEducator);
+  const visibleNavItems = NAV_ITEMS.filter((item) => {
+    if (item.id === "educator") return isEducator || isEmployer;
+    if (item.id === "assigned") return Boolean(user);
+    return true;
+  });
 
   return (
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-brand-row"><a href="#home" onClick={(event) => { event.preventDefault(); setSection("overview"); }}><Logo /></a><button className="icon-button sidebar-mobile-close" onClick={() => setSidebarOpen(false)} aria-label="Close menu"><X size={18} /></button></div>
-        <div className="workspace-switch"><div className="workspace-avatar">{demo ? "S" : (firstName[0] || "i").toUpperCase()}</div><span><strong>{demo ? "Sample workspace" : `${firstName}’s workspace`}</strong><small>{demo ? "PREVIEW MODE" : "PERSONAL SPACE"}</small></span><ChevronDown size={15} /></div>
+        <div className="workspace-switch"><div className="workspace-avatar">{demo ? "S" : (firstName[0] || "i").toUpperCase()}</div><span><strong>{demo ? "Sample workspace" : `${firstName}’s workspace`}</strong><small>{demo ? "PREVIEW MODE" : isEmployer && !isEducator ? "HIRING & STUDY" : "PERSONAL STUDY"}</small></span><ChevronDown size={15} /></div>
         <span className="sidebar-label">WORKSPACE</span>
         <nav className="side-nav" aria-label="Workspace">
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
-            return <button key={item.id} className={`nav-item ${section === item.id ? "active" : ""}`} onClick={() => { if (item.id === "create") openExamBuilder("practice"); else setSection(item.id); setSidebarOpen(false); }}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span>{item.id === "create" && <span className="nav-kbd">⌘ K</span>}</button>;
+            const label = item.id === "educator" ? (isEmployer && isEducator ? "Educator & hiring workspace" : isEmployer ? "Hiring workspace" : "Educator workspace") : item.label;
+            return <button key={item.id} className={`nav-item ${section === item.id ? "active" : ""}`} onClick={() => { if (item.id === "create") openExamBuilder("practice"); else setSection(item.id); setSidebarOpen(false); }}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{item.id === "create" && <span className="nav-kbd">⌘ K</span>}</button>;
           })}
         </nav>
         <div className="sidebar-bottom">
@@ -580,7 +597,8 @@ function App() {
         <div className="page-content">
           {section === "overview" && <Overview firstName={firstName} exams={matchingExams} documents={documents} attempts={attempts} setSection={setSection} setActiveExam={setActiveExam} onCreate={() => openExamBuilder("practice")} onOpenExam={(exam) => { setActiveExam(exam); setSection("practice"); }} />}
           {section === "create" && <CreateExam documents={documents} onUpload={uploadFiles} onGenerate={createExam} notify={notify} />}
-          {section === "educator" && isEducator && user && <EducatorWorkspace user={user} exams={exams} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
+          {section === "assigned" && user && <StudentWorkspace user={user} onCreateExam={() => openExamBuilder("practice")} notify={notify} />}
+          {section === "educator" && (isEducator || isEmployer) && user && <EducatorWorkspace user={user} exams={exams} workspaceKind={isEmployer && !isEducator ? "employer" : "educator"} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
           {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} />}
           {section === "study" && <StudyDesk documents={documents} onAsk={askTutor} notify={notify} />}
           {section === "practice" && <ExamRoom exams={matchingExams} activeExam={activeExam} session={examSession} setSession={setExamSession} onCreate={() => setSection("create")} onStart={(exam) => { setActiveExam(exam); setExamSession({ exam, answers: {}, remainingSeconds: (Number(exam.durationMinutes) || 20) * 60, finished: false }); }} onSubmit={() => finishExam(examSession)} onExport={exportExam} />}

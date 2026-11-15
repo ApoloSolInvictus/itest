@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { FieldPath } from "firebase-admin/firestore";
+import { createHash, randomBytes } from "node:crypto";
 import { getAdminServices } from "../server/admin.js";
 import { consumeUserQuota, requireEducator } from "../server/auth.js";
 
@@ -63,13 +62,31 @@ function safeQuestions(exam) {
     error.status = 400;
     throw error;
   }
-  return exam.questions.map((question, index) => ({
-    id: cleanText(question.id, 100) || `q${index + 1}`,
-    prompt: cleanText(question.prompt, 1800),
-    type: ["multiple_choice", "true_false", "short_answer"].includes(question.type) ? question.type : "short_answer",
-    options: Array.isArray(question.options) ? question.options.slice(0, 6).map((option) => cleanText(option, 300)) : [],
-    points: Math.max(1, Math.min(10, Number(question.points) || 1))
-  }));
+  const seenIds = new Set();
+  return exam.questions.map((question, index) => {
+    const baseId = cleanText(question.id, 100) || `q${index + 1}`;
+    let id = baseId;
+    let suffix = 2;
+    while (seenIds.has(id)) id = `${baseId}-${suffix++}`;
+    seenIds.add(id);
+
+    const prompt = cleanText(question.prompt, 1800);
+    const answer = cleanText(question.answer, 1000);
+    const type = ["multiple_choice", "true_false", "short_answer"].includes(question.type) ? question.type : "short_answer";
+    const options = Array.isArray(question.options) ? question.options.slice(0, 6).map((option) => cleanText(option, 300)).filter(Boolean) : [];
+    if (!prompt || !answer || (type !== "short_answer" && options.length < 2)) {
+      const error = new Error("Every assigned question needs a prompt, correct answer, and answer choices when applicable.");
+      error.status = 400;
+      throw error;
+    }
+    return {
+      id,
+      prompt,
+      type,
+      options,
+      points: Math.max(1, Math.min(10, Number(question.points) || 1))
+    };
+  });
 }
 
 function getBaseUrl() {
@@ -85,14 +102,16 @@ async function sendInvitations({ assignment, students, teacherName, apiKey, from
       const name = htmlEscape(student.name);
       const title = htmlEscape(assignment.title);
       const teacher = htmlEscape(teacherName || "Your educator");
+      const hiring = assignment.workspaceKind === "employer";
+      const reviewer = hiring ? "hiring team" : "educator";
       const subject = `${teacherName || "Your educator"} invited you to ${assignment.title}`.replace(/[\r\n]/g, " ").slice(0, 180);
-      const text = `Hello ${student.name},\n\n${teacherName || "Your educator"} has invited you to complete ${assignment.title}.\nSubject: ${assignment.subject}\nTime allowed: ${assignment.durationMinutes} minutes\n\nOpen your exam: ${shareUrl}\n\nYour result will be saved for your educator.`;
+      const text = `Hello ${student.name},\n\n${teacherName || (hiring ? "Your hiring team" : "Your educator")} has invited you to complete ${assignment.title}.\nSubject: ${assignment.subject}\nPassing score: ${assignment.passingScore}%\nTime allowed: ${assignment.durationMinutes} minutes\n\nOpen your assessment: ${shareUrl}\n\nSign in or create an iTest account with this exact email address. Verify the email before starting. You can retry until you reach the passing score. Your attempts will be saved in your iTest workspace and shared with the ${reviewer}.`;
       return {
         from: fromEmail,
         to: [student.email],
         subject,
         text,
-        html: `<div style="font-family:Arial,sans-serif;line-height:1.6;color:#171814;max-width:560px;margin:auto"><p>Hello ${name},</p><p>${teacher} has invited you to complete <strong>${title}</strong>.</p><p><strong>Subject:</strong> ${htmlEscape(assignment.subject)}<br><strong>Time allowed:</strong> ${assignment.durationMinutes} minutes</p><p><a href="${shareUrl}" style="display:inline-block;background:#171814;color:#fff;text-decoration:none;border-radius:8px;padding:12px 18px">Open your exam</a></p><p style="color:#666;font-size:13px">Your result will be saved for your educator.</p></div>`
+        html: `<div style="font-family:Arial,sans-serif;line-height:1.6;color:#171814;max-width:560px;margin:auto"><p>Hello ${name},</p><p>${teacher} has invited you to complete <strong>${title}</strong>.</p><p><strong>Subject:</strong> ${htmlEscape(assignment.subject)}<br><strong>Passing score:</strong> ${assignment.passingScore}%<br><strong>Time allowed:</strong> ${assignment.durationMinutes} minutes</p><p><a href="${shareUrl}" style="display:inline-block;background:#171814;color:#fff;text-decoration:none;border-radius:8px;padding:12px 18px">Open your assessment</a></p><p>Sign in or create an iTest account with this exact email address and verify it before starting. You can retry until you reach the passing score.</p><p style="color:#666;font-size:13px">Your attempts and results will appear in your iTest workspace and be shared with the ${reviewer}.</p></div>`
       };
     });
     const response = await fetch("https://api.resend.com/emails/batch", {
@@ -114,18 +133,21 @@ async function sendInvitations({ assignment, students, teacherName, apiKey, from
 
 function readCursor(value) {
   if (!value) return null;
-  const [timestampText, id] = String(value).split(":", 2);
-  const timestamp = Number(timestampText);
-  if (!Number.isFinite(timestamp) || !id || id.length > 150) {
+  const raw = String(value);
+  const legacyParts = raw.split(":", 2);
+  const isLegacyCursor = legacyParts.length === 2;
+  const id = isLegacyCursor ? legacyParts[1] : raw;
+  const timestamp = isLegacyCursor ? Number(legacyParts[0]) : null;
+  if (!id || id.length > 150 || (isLegacyCursor && !Number.isFinite(timestamp))) {
     const error = new Error("That page cursor is not valid. Refresh and try again.");
     error.status = 400;
     throw error;
   }
-  return { timestamp, id };
+  return { id, timestamp };
 }
 
 function nextCursor(snapshot) {
-  return snapshot ? `${Number(snapshot.get("createdAt") || snapshot.get("submittedAt") || 0)}:${snapshot.id}` : "";
+  return snapshot?.id || "";
 }
 
 async function loadWorkspace(db, uid, request) {
@@ -136,10 +158,18 @@ async function loadWorkspace(db, uid, request) {
     return { list: snapshot.exists ? { id: snapshot.id, ...snapshot.data() } : null };
   }
   const cursor = readCursor(request.query?.cursor);
-  let assignmentQuery = userRef.collection("assignments")
-    .orderBy("createdAt", "desc")
-    .orderBy(FieldPath.documentId(), "desc");
-  if (cursor) assignmentQuery = assignmentQuery.startAfter(cursor.timestamp, cursor.id);
+  const assignmentCollection = userRef.collection("assignments");
+  let assignmentQuery = assignmentCollection.orderBy("createdAt", "desc");
+  if (cursor) {
+    const boundary = await assignmentCollection.doc(cursor.id).get();
+    if (boundary.exists) assignmentQuery = assignmentQuery.startAfter(boundary);
+    else if (cursor.timestamp !== null) assignmentQuery = assignmentQuery.startAfter(cursor.timestamp);
+    else {
+      const error = new Error("That page has changed. Refresh and try again.");
+      error.status = 400;
+      throw error;
+    }
+  }
   const [listSnapshot, assignmentSnapshot] = await Promise.all([
     userRef.collection("mailingLists").orderBy("updatedAt", "desc").get(),
     assignmentQuery.limit(MAX_ASSIGNMENTS + 1).get()
@@ -173,8 +203,17 @@ async function loadWorkspace(db, uid, request) {
 async function loadResults(db, uid, request) {
   const userResults = db.collection("users").doc(uid).collection("studentResults");
   const cursor = readCursor(request.query?.cursor);
-  let query = userResults.orderBy("submittedAt", "desc").orderBy(FieldPath.documentId(), "desc");
-  if (cursor) query = query.startAfter(cursor.timestamp, cursor.id);
+  let query = userResults.orderBy("submittedAt", "desc");
+  if (cursor) {
+    const boundary = await userResults.doc(cursor.id).get();
+    if (boundary.exists) query = query.startAfter(boundary);
+    else if (cursor.timestamp !== null) query = query.startAfter(cursor.timestamp);
+    else {
+      const error = new Error("That page has changed. Refresh and try again.");
+      error.status = 400;
+      throw error;
+    }
+  }
   const snapshot = await query.limit(MAX_RESULTS + 1).get();
   const page = snapshot.docs.slice(0, MAX_RESULTS);
   return {
@@ -207,7 +246,7 @@ async function saveList(db, uid, body) {
   return { id, ...list };
 }
 
-async function createAssignment(db, uid, body) {
+async function createAssignment(db, uid, user, body) {
   const examId = cleanText(body.examId, 100);
   const listId = cleanText(body.listId, 100);
   if (!examId || !listId) {
@@ -239,6 +278,17 @@ async function createAssignment(db, uid, body) {
     answer: cleanText(question.answer, 1000),
     explanation: cleanText(question.explanation, 1200)
   }));
+  const fallbackQuestionCount = questions.length;
+  const requestedQuestionCount = Number(body.questionsPerAttempt);
+  const questionCount = Number.isFinite(requestedQuestionCount)
+    ? Math.max(1, Math.min(fallbackQuestionCount, Math.floor(requestedQuestionCount)))
+    : fallbackQuestionCount;
+  const requestedPassingScore = Number(body.passingScore);
+  const passingScore = Number.isFinite(requestedPassingScore)
+    ? Math.max(0, Math.min(100, Math.round(requestedPassingScore)))
+    : 70;
+  const ownerName = cleanText(user.name, 100) || user.email.split("@")[0] || (user.employer ? "Hiring team" : "Your educator");
+  const workspaceKind = user.employer ? "employer" : "educator";
   const assignmentRef = userRef.collection("assignments").doc();
   const shareId = randomBytes(32).toString("base64url");
   const shareUrl = `${getBaseUrl()}/exam/${shareId}`;
@@ -246,9 +296,13 @@ async function createAssignment(db, uid, body) {
   const assignment = {
     title: cleanText(exam.title, 160) || "Untitled exam",
     subject: cleanText(exam.subject, 120) || "General study",
+    ownerName,
+    workspaceKind,
     summary: cleanText(exam.summary, 1000),
     durationMinutes: Math.max(1, Math.min(180, Number(exam.durationMinutes) || 20)),
-    questionCount: questions.length,
+    questionCount,
+    questionBankCount: questions.length,
+    passingScore,
     questions: privateQuestions,
     examId,
     listId,
@@ -269,9 +323,13 @@ async function createAssignment(db, uid, body) {
     assignmentId: assignmentRef.id,
     title: assignment.title,
     subject: assignment.subject,
+    ownerName: assignment.ownerName,
+    workspaceKind: assignment.workspaceKind,
     summary: assignment.summary,
     durationMinutes: assignment.durationMinutes,
     questionCount: assignment.questionCount,
+    questionBankCount: assignment.questionBankCount,
+    passingScore: assignment.passingScore,
     questions,
     active: true,
     createdAt: now
@@ -355,6 +413,24 @@ async function deleteAssignment(db, uid, assignmentId) {
     sessions.docs.forEach((entry) => batch.delete(entry.ref));
     await batch.commit();
   }
+  const students = await assignmentRef.collection("students").get();
+  for (const student of students.docs) {
+    const studentUid = String(student.get("studentUid") || student.id);
+    const workspaceId = createHash("sha256").update(`${uid}:${assignmentId}`).digest("hex");
+    const studentAssignmentRef = db.collection("users").doc(studentUid)
+      .collection("assignedExams").doc(workspaceId);
+    while (true) {
+      const attempts = await studentAssignmentRef.collection("attempts").limit(400).get();
+      if (attempts.empty) break;
+      const batch = db.batch();
+      attempts.docs.forEach((entry) => batch.delete(entry.ref));
+      await batch.commit();
+    }
+    const batch = db.batch();
+    batch.delete(studentAssignmentRef);
+    batch.delete(student.ref);
+    await batch.commit();
+  }
   while (true) {
     const results = await userRef.collection("studentResults").where("assignmentId", "==", assignmentId).limit(400).get();
     if (results.empty) break;
@@ -403,7 +479,7 @@ export default async function handler(request, response) {
       return response.status(200).json({ ok: true });
     }
     if (action === "create-assignment") {
-      const result = await createAssignment(db, user.uid, body);
+      const result = await createAssignment(db, user.uid, user, body);
       return response.status(201).json(result);
     }
     if (action === "send-assignment") {

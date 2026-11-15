@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { getAdminServices } from "../server/admin.js";
-import { consumePublicQuota } from "../server/auth.js";
+import { consumePublicQuota, requireVerifiedUser } from "../server/auth.js";
 
 function cleanText(value, maxLength) {
   return String(value || "").trim().slice(0, maxLength);
@@ -13,13 +13,56 @@ function readShareId(request, body) {
   catch { return ""; }
 }
 
-function findInvitee(assignment, email) {
-  if (!Array.isArray(assignment.recipients)) return null;
-  return assignment.recipients.find((student) => String(student?.email || "").trim().toLowerCase() === email) || null;
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
-function normalizeName(value) {
-  return String(value || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+function shuffled(values) {
+  const result = [...values];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(index + 1);
+    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  }
+  return result;
+}
+
+function publicQuestion(question, previousOptions = []) {
+  let options = Array.isArray(question.options) ? shuffled(question.options) : [];
+  if (options.length > 1 && JSON.stringify(options) === JSON.stringify(previousOptions)) {
+    options = [...options.slice(1), options[0]];
+  }
+  return {
+    id: question.id,
+    prompt: question.prompt,
+    type: question.type,
+    options,
+    points: question.points
+  };
+}
+
+function pickQuestions(questionBank, count, previousIds) {
+  const previousSet = new Set(previousIds || []);
+  let picked = shuffled(questionBank).slice(0, count);
+  const hasDifferentSelection = (items) => items.some((question) => !previousSet.has(question.id));
+  if (previousSet.size && questionBank.length > count && !hasDifferentSelection(picked)) {
+    const replacement = shuffled(questionBank.filter((question) => !previousSet.has(question.id)))[0];
+    if (replacement && picked.length) picked[randomInt(picked.length)] = replacement;
+  }
+  picked = shuffled(picked);
+  const previousOrder = previousIds || [];
+  if (picked.length > 1 && picked.map((question) => question.id).join("|") === previousOrder.join("|")) {
+    picked = [...picked.slice(1), picked[0]];
+  }
+  return picked;
+}
+
+function sendError(response, error) {
+  const status = Number.isInteger(error.status) ? error.status : 503;
+  return response.status(status).json({
+    error: status >= 500 && status !== 503
+      ? "iTest could not start this exam. Please try again."
+      : error.message
+  });
 }
 
 export default async function handler(request, response) {
@@ -29,117 +72,122 @@ export default async function handler(request, response) {
     return response.status(405).json({ error: "Use POST for this endpoint." });
   }
 
-  const body = request.body && typeof request.body === "object" ? request.body : {};
-  const shareId = readShareId(request, body);
-  if (!/^[A-Za-z0-9_-]{32,64}$/.test(shareId)) {
-    return response.status(404).json({ error: "This exam link is not valid." });
-  }
-
   try {
-    consumePublicQuota(request, shareId);
-    const name = cleanText(body.name, 100);
-    const email = cleanText(body.email, 254).toLowerCase();
-    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return response.status(400).json({ error: "Enter your name and a valid email address." });
+    const user = await requireVerifiedUser(request);
+    const body = request.body && typeof request.body === "object" ? request.body : {};
+    const shareId = readShareId(request, body);
+    if (!/^[A-Za-z0-9_-]{32,64}$/.test(shareId)) {
+      return response.status(404).json({ error: "This exam link is not valid." });
     }
 
+    consumePublicQuota(request, shareId);
     const { db } = getAdminServices();
     const publicRef = db.collection("publicExams").doc(shareId);
     const publicSnapshot = await publicRef.get();
     if (!publicSnapshot.exists || publicSnapshot.data().active !== true) {
       return response.status(404).json({ error: "This exam link is no longer available." });
     }
-    const publicData = publicSnapshot.data();
-    const assignmentRef = db.collection("users").doc(publicData.ownerUid)
-      .collection("assignments").doc(publicData.assignmentId);
-    const assignmentSnapshot = await assignmentRef.get();
-    if (!assignmentSnapshot.exists || assignmentSnapshot.data().active !== true) {
-      return response.status(404).json({ error: "This exam link is no longer available." });
-    }
-    const invitee = findInvitee(assignmentSnapshot.data(), email);
-    if (!invitee) {
-      return response.status(403).json({ error: "This exam link was sent to a different email address." });
-    }
-    if (normalizeName(name) !== normalizeName(invitee.name)) {
-      return response.status(403).json({ error: "Use the name saved on your educator’s student list for this email address." });
-    }
-    const rosterName = cleanText(invitee.name, 100);
 
-    const emailHash = createHash("sha256").update(email).digest("hex");
-    const sessionRef = assignmentRef.collection("sessions").doc(emailHash);
-    const resultRef = assignmentRef.collection("results").doc(emailHash);
+    const publicData = publicSnapshot.data();
+    const ownerUid = String(publicData.ownerUid || "");
+    const assignmentId = String(publicData.assignmentId || "");
+    if (!ownerUid || !assignmentId) return response.status(404).json({ error: "This exam link is not valid." });
+
+    const assignmentRef = db.collection("users").doc(ownerUid).collection("assignments").doc(assignmentId);
+    const enrollmentRef = assignmentRef.collection("students").doc(user.uid);
+    const sessionRef = assignmentRef.collection("sessions").doc(user.uid);
     let activeSession;
+    let studentName = "";
+    let assignment;
 
     await db.runTransaction(async (transaction) => {
-      const [currentPublic, currentAssignment, sessionSnapshot, resultSnapshot] = await Promise.all([
+      const [currentPublic, assignmentSnapshot, enrollmentSnapshot, sessionSnapshot] = await Promise.all([
         transaction.get(publicRef),
         transaction.get(assignmentRef),
-        transaction.get(sessionRef),
-        transaction.get(resultRef)
+        transaction.get(enrollmentRef),
+        transaction.get(sessionRef)
       ]);
       if (!currentPublic.exists || currentPublic.data().active !== true
-        || !currentAssignment.exists || currentAssignment.data().active !== true) {
+        || !assignmentSnapshot.exists || assignmentSnapshot.data().active !== true) {
         const error = new Error("This exam link is no longer available.");
         error.status = 404;
         throw error;
       }
-      const currentInvitee = findInvitee(currentAssignment.data(), email);
-      if (!currentInvitee) {
-        const error = new Error("This exam link was sent to a different email address.");
+      assignment = assignmentSnapshot.data();
+      const invitee = Array.isArray(assignment.recipients)
+        ? assignment.recipients.find((student) => normalizeEmail(student?.email) === normalizeEmail(user.email))
+        : null;
+      if (!invitee || !enrollmentSnapshot.exists
+        || normalizeEmail(enrollmentSnapshot.data().email) !== normalizeEmail(user.email)) {
+        const error = new Error("Open the invitation with the verified iTest account that received it.");
         error.status = 403;
         throw error;
       }
-      if (normalizeName(rosterName) !== normalizeName(currentInvitee.name)) {
-        const error = new Error("This student list changed. Ask your educator for an updated exam link.");
+      studentName = String(invitee.name || enrollmentSnapshot.data().name || user.name || "Student").trim().slice(0, 100);
+      const progress = enrollmentSnapshot.data();
+      if (progress.passed === true) {
+        const error = new Error("You have already reached the passing score for this exam.");
         error.status = 409;
         throw error;
       }
-      if (resultSnapshot.exists) {
-        const error = new Error("A result has already been submitted for this email address.");
-        error.status = 409;
-        throw error;
-      }
-      if (sessionSnapshot.exists) {
-        const saved = sessionSnapshot.data();
-        if (saved.name !== rosterName) {
-          const error = new Error("Use the same name you entered when you began this exam.");
-          error.status = 409;
-          throw error;
-        }
-        if (Date.now() > Number(saved.deadlineAt || 0)) {
-          const error = new Error("The time for this exam has expired.");
-          error.status = 410;
-          throw error;
-        }
-        activeSession = saved;
+
+      const now = Date.now();
+      const savedSession = sessionSnapshot.exists ? sessionSnapshot.data() : null;
+      if (savedSession && !savedSession.completedAt && now <= Number(savedSession.deadlineAt || 0)) {
+        activeSession = savedSession;
         return;
       }
 
-      const startedAt = Date.now();
-      const durationMinutes = Math.max(1, Math.min(180, Number(currentAssignment.data().durationMinutes) || 20));
+      const privateQuestions = Array.isArray(assignment.questions) ? assignment.questions : [];
+      if (!privateQuestions.length) {
+        const error = new Error("This exam does not contain any questions.");
+        error.status = 409;
+        throw error;
+      }
+      const desiredCount = Math.max(1, Math.min(
+        privateQuestions.length,
+        Number(assignment.questionCount) || privateQuestions.length
+      ));
+      const previousQuestionById = new Map((savedSession?.questions || []).map((question) => [question.id, question.options || []]));
+      const selectedQuestions = pickQuestions(privateQuestions, desiredCount, savedSession?.questionIds);
+      const attemptQuestions = selectedQuestions.map((question) => publicQuestion(question, previousQuestionById.get(question.id)));
+      const durationMinutes = Math.max(1, Math.min(180, Number(assignment.durationMinutes) || 20));
       activeSession = {
-        name: rosterName,
-        email,
+        studentUid: user.uid,
+        email: normalizeEmail(user.email),
+        name: studentName,
         sessionToken: randomBytes(32).toString("base64url"),
-        startedAt,
-        deadlineAt: startedAt + durationMinutes * 60_000
+        attemptNumber: Math.max(0, Number(progress.attemptCount) || 0) + 1,
+        questionIds: attemptQuestions.map((question) => question.id),
+        questions: attemptQuestions,
+        startedAt: now,
+        deadlineAt: now + durationMinutes * 60_000,
+        completedAt: null
       };
-      transaction.create(sessionRef, activeSession);
+      transaction.set(sessionRef, activeSession);
     });
 
     return response.status(200).json({
       sessionToken: activeSession.sessionToken,
-      name: activeSession.name,
+      name: activeSession.name || studentName,
+      attemptNumber: activeSession.attemptNumber,
+      questions: activeSession.questions,
       startedAt: activeSession.startedAt,
       deadlineAt: activeSession.deadlineAt,
-      remainingSeconds: Math.max(0, Math.ceil((activeSession.deadlineAt - Date.now()) / 1000))
+      remainingSeconds: Math.max(0, Math.ceil((activeSession.deadlineAt - Date.now()) / 1000)),
+      exam: {
+        title: assignment?.title || publicData.title,
+        subject: assignment?.subject || publicData.subject,
+        summary: assignment?.summary || publicData.summary || "",
+        questionCount: activeSession.questions.length,
+        questionBankCount: Number(assignment?.questionBankCount) || activeSession.questions.length,
+        durationMinutes: Number(assignment?.durationMinutes) || Number(publicData.durationMinutes) || 20,
+        passingScore: Number.isFinite(Number(assignment?.passingScore))
+          ? Math.max(0, Math.min(100, Number(assignment.passingScore)))
+          : 70
+      }
     });
   } catch (error) {
-    const status = Number.isInteger(error.status) ? error.status : 503;
-    return response.status(status).json({
-      error: status >= 500 && status !== 503
-        ? "iTest could not start this exam. Please try again."
-        : error.message
-    });
+    return sendError(response, error);
   }
 }

@@ -22,7 +22,7 @@ function statusLabel(status) {
   return "Link ready";
 }
 
-export default function EducatorWorkspace({ user, exams, onCreateExam, notify }) {
+export default function EducatorWorkspace({ user, exams, workspaceKind = "educator", onCreateExam, notify }) {
   const [data, setData] = useState({ lists: [], assignments: [], hasMoreAssignments: false, nextAssignmentCursor: "" });
   const [resultData, setResultData] = useState({ results: [], hasMore: false, nextCursor: "" });
   const [tab, setTab] = useState("assignments");
@@ -31,6 +31,8 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
   const [busy, setBusy] = useState(false);
   const [selectedExam, setSelectedExam] = useState("");
   const [selectedList, setSelectedList] = useState("");
+  const [questionsPerAttempt, setQuestionsPerAttempt] = useState(0);
+  const [passingScore, setPassingScore] = useState(70);
   const [listDialog, setListDialog] = useState(null);
   const [listName, setListName] = useState("");
   const [students, setStudents] = useState([]);
@@ -115,6 +117,13 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
     if (!selectedExam && exams.length) setSelectedExam(exams[0].id);
   }, [exams, selectedExam]);
 
+  const selectedExamRecord = exams.find((exam) => exam.id === selectedExam);
+  const questionBankSize = Math.max(1, Number(selectedExamRecord?.questions?.length || selectedExamRecord?.questionCount) || 1);
+  useEffect(() => {
+    if (!selectedExamRecord) return;
+    setQuestionsPerAttempt(questionBankSize > 1 ? Math.max(1, Math.floor(questionBankSize * 0.75)) : questionBankSize);
+  }, [selectedExam, questionBankSize]);
+
   useEffect(() => {
     if (!selectedList && data.lists.length) setSelectedList(data.lists[0].id);
   }, [data.lists, selectedList]);
@@ -134,10 +143,13 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
 
   async function createAssignment(event) {
     event.preventDefault();
-    if (!selectedExam || !selectedList) return notify("Choose an exam and a student list first.", "info");
+    if (!selectedExam || !selectedList) return notify(`Choose an exam and a ${workspaceKind === "employer" ? "candidate" : "student"} list first.`, "info");
     setBusy(true);
     try {
-      const result = await callApi("POST", { action: "create-assignment", examId: selectedExam, listId: selectedList });
+      const result = await callApi("POST", {
+        action: "create-assignment", examId: selectedExam, listId: selectedList,
+        questionsPerAttempt, passingScore
+      });
       if (!result.assignment?.id) throw new Error("The exam link could not be created.");
       let delivery;
       try {
@@ -149,7 +161,7 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
       }
       await refresh();
       if (delivery.emailStatus === "sent") {
-        notify(`Exam link created and sent to ${Number(delivery.sentCount || 0)} students.`, "success");
+        notify(`Exam link created and sent to ${Number(delivery.sentCount || 0)} ${workspaceKind === "employer" ? "candidates" : "students"}.`, "success");
       } else if (delivery.emailStatus === "failed") {
         notify("The exam link was saved, but email delivery failed. You can copy the link and try sending again.", "error");
       } else {
@@ -312,7 +324,7 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
   return (
     <div className="educator-page">
       <div className="educator-heading">
-        <div><span className="eyebrow">TEACHING WORKSPACE</span><h1>Your class, in focus.</h1><p>Create exam links, invite students, and follow every submitted result.</p></div>
+        <div><span className="eyebrow">{workspaceKind === "employer" ? "HIRING WORKSPACE" : "TEACHING WORKSPACE"}</span><h1>{workspaceKind === "employer" ? "Your hiring pipeline, in focus." : "Your class, in focus."}</h1><p>{workspaceKind === "employer" ? "Create role assessments, invite candidates, and review every attempt with your hiring team." : "Create exam links, invite students, and follow every submitted result."}</p></div>
         <div className="educator-heading-actions">
           <button className="button button-outline" onClick={async () => { await refresh(true); if (tab === "results") await loadResults(); }} disabled={loading || busy}><RefreshCw size={15} /> Refresh</button>
           <button className="button button-dark" onClick={onCreateExam}><Plus size={16} /> Create an exam</button>
@@ -321,28 +333,31 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
 
       <div className="educator-metrics">
         <article><span className="educator-metric-icon"><FileText size={17} /></span><strong>{data.assignments.length.toString().padStart(2, "0")}</strong><small>Exam links</small></article>
-        <article><span className="educator-metric-icon"><Users size={17} /></span><strong>{totalContacts.toLocaleString("en")}</strong><small>Students in lists</small></article>
-        <article><span className="educator-metric-icon"><Check size={17} /></span><strong>{results.length.toString().padStart(2, "0")}</strong><small>Results received</small></article>
+        <article><span className="educator-metric-icon"><Users size={17} /></span><strong>{totalContacts.toLocaleString("en")}</strong><small>{workspaceKind === "employer" ? "Candidates in lists" : "Students in lists"}</small></article>
+        <article><span className="educator-metric-icon"><Check size={17} /></span><strong>{results.length.toString().padStart(2, "0")}</strong><small>Attempts received</small></article>
         <article><span className="educator-metric-icon"><ArrowRight size={17} /></span><strong>{results.length ? `${averageScore}%` : "—"}</strong><small>Average score</small></article>
       </div>
 
       <div className="educator-tabs" role="tablist" aria-label="Educator workspace sections">
-        {TABS.map((item) => <button key={item.id} role="tab" aria-selected={tab === item.id} className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>{item.label}</button>)}
+        {TABS.map((item) => <button key={item.id} role="tab" aria-selected={tab === item.id} className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>{item.id === "lists" && workspaceKind === "employer" ? "Candidate lists" : item.label}</button>)}
       </div>
 
       {tab === "assignments" && <section className="educator-section">
-        <div className="educator-section-heading"><div><span className="eyebrow">ASSESS & INVITE</span><h2>Create an exam link</h2><p>Each link is unique. Students see the exam, and their answer key stays private.</p></div></div>
+        <div className="educator-section-heading"><div><span className="eyebrow">ASSESS & INVITE</span><h2>Create an exam link</h2><p>Each link connects a verified iTest account to the exam, teacher, subject, and score history.</p></div></div>
         <form className="assignment-create-card" onSubmit={createAssignment}>
           <label className="field"><span>Exam</span><select value={selectedExam} onChange={(event) => setSelectedExam(event.target.value)} disabled={!exams.length}><option value="">{exams.length ? "Choose an exam" : "Create an exam first"}</option>{exams.map((exam) => <option value={exam.id} key={exam.id}>{exam.title} · {exam.subject || "General study"}</option>)}</select></label>
-          <label className="field"><span>Student list</span><select value={selectedList} onChange={(event) => setSelectedList(event.target.value)} disabled={!data.lists.length}><option value="">{data.lists.length ? "Choose a saved list" : "Create a student list first"}</option>{data.lists.map((list) => <option value={list.id} key={list.id}>{list.name} · {list.studentCount || list.students?.length || 0}</option>)}</select></label>
+          <label className="field"><span>{workspaceKind === "employer" ? "Candidate list" : "Student list"}</span><select value={selectedList} onChange={(event) => setSelectedList(event.target.value)} disabled={!data.lists.length}><option value="">{data.lists.length ? "Choose a saved list" : `Create a ${workspaceKind === "employer" ? "candidate" : "student"} list first`}</option>{data.lists.map((list) => <option value={list.id} key={list.id}>{list.name} · {list.studentCount || list.students?.length || 0}</option>)}</select></label>
+          <label className="field"><span>Questions per attempt</span><select value={questionsPerAttempt} onChange={(event) => setQuestionsPerAttempt(Number(event.target.value))} disabled={!selectedExamRecord}>{Array.from({ length: questionBankSize }, (_, index) => index + 1).map((count) => <option value={count} key={count}>{count} of {questionBankSize} questions</option>)}</select></label>
+          <label className="field"><span>Passing score (%)</span><input type="number" min="0" max="100" step="1" value={passingScore} onChange={(event) => setPassingScore(Math.max(0, Math.min(100, Number(event.target.value) || 0)))} /></label>
           <button className="button button-dark" disabled={busy || loading || !exams.length || !data.lists.length}><Send size={15} /> {busy ? "Preparing…" : "Create link & send"}</button>
         </form>
+        <p className="assignment-randomization-note">Every attempt draws a fresh question selection from the saved exam and shuffles question and answer order. Scores below the passing mark can be retried; each attempt is kept in both workspaces.</p>
 
         <div className="educator-section-heading educator-list-heading"><div><span className="eyebrow">YOUR ACTIVE LINKS</span><h2>Assigned exams</h2></div><span className="educator-count">{data.assignments.length.toLocaleString("en")} shown</span></div>
         {loading ? <div className="educator-loading"><LoaderCircle size={18} className="spin" /> Loading your assignments…</div> : data.assignments.length ? <div className="educator-assignment-list">
           {data.assignments.map((assignment) => <article className="educator-assignment-card" key={assignment.id}>
-            <div className="educator-assignment-top"><span className="educator-assignment-icon"><FileText size={17} /></span><div className="educator-assignment-main"><strong>{assignment.title}</strong><span>{assignment.subject} <i>·</i> {assignment.questionCount} questions <i>·</i> {assignment.durationMinutes} min</span></div><span className={`delivery-status delivery-${assignment.emailStatus || "not-sent"}`}><i />{statusLabel(assignment.emailStatus)}</span></div>
-            <p className="educator-assignment-meta">Sent to <strong>{assignment.listName || "student list"}</strong> · {Number(assignment.recipientCount || 0).toLocaleString("en")} students · {Number(assignment.totalSubmissions || assignment.results?.length || 0).toLocaleString("en")} results · Created {dateLabel(assignment.createdAt)}</p>
+            <div className="educator-assignment-top"><span className="educator-assignment-icon"><FileText size={17} /></span><div className="educator-assignment-main"><strong>{assignment.title}</strong><span>{assignment.subject} <i>·</i> {assignment.questionCount} per attempt / {assignment.questionBankCount || assignment.questionCount} in bank <i>·</i> {assignment.durationMinutes} min</span></div><span className={`delivery-status delivery-${assignment.emailStatus || "not-sent"}`}><i />{statusLabel(assignment.emailStatus)}</span></div>
+            <p className="educator-assignment-meta">Sent to <strong>{assignment.listName || (workspaceKind === "employer" ? "candidate list" : "student list")}</strong> · {Number(assignment.recipientCount || 0).toLocaleString("en")} {workspaceKind === "employer" ? "candidates" : "students"} · {Number(assignment.totalSubmissions || assignment.results?.length || 0).toLocaleString("en")} attempts · {assignment.passingScore ?? 70}% to pass · Created {dateLabel(assignment.createdAt)}</p>
             <div className="educator-link-row"><a href={assignment.shareUrl} target="_blank" rel="noreferrer"><span>{assignment.shareUrl}</span><ExternalLink size={14} /></a><button className="button button-outline button-small" onClick={() => copyLink(assignment.shareUrl)}><Copy size={14} /> Copy</button><button className="button button-outline button-small" onClick={() => sendAgain(assignment)} disabled={busy}><Mail size={14} /> Send again</button><button className="icon-button educator-delete" onClick={() => deleteAssignment(assignment)} aria-label={`Delete link for ${assignment.title}`} disabled={busy}><Trash2 size={15} /></button></div>
           </article>)}
         </div> : <div className="educator-empty"><span className="educator-empty-icon"><Send size={19} /></span><h3>Your first exam link starts here.</h3><p>Choose a saved exam and a student list to create a private, shareable exam link.</p></div>}
@@ -350,26 +365,30 @@ export default function EducatorWorkspace({ user, exams, onCreateExam, notify })
       </section>}
 
       {tab === "lists" && <section className="educator-section">
-        <div className="educator-section-heading"><div><span className="eyebrow">CLASS ROSTERS</span><h2>Student lists</h2><p>Save names and email addresses, then reuse each list for any exam.</p></div><button className="button button-dark" onClick={() => openListEditor()}><Plus size={15} /> New list</button></div>
-        {loading ? <div className="educator-loading"><LoaderCircle size={18} className="spin" /> Loading your student lists…</div> : data.lists.length ? <div className="student-list-grid">
-          {data.lists.map((list) => <article className="student-list-card" key={list.id}><div className="student-list-head"><span className="student-list-icon"><Users size={17} /></span><button className="icon-button" onClick={() => openListEditor(list)} aria-label={`Edit ${list.name}`}><Pencil size={15} /></button></div><h3>{list.name}</h3><p>{Number(list.studentCount || list.students?.length || 0).toLocaleString("en")} students · Updated {dateLabel(list.updatedAt)}</p><div className="student-list-preview">{list.students?.slice(0, 3).map((student) => <span key={student.id}><strong>{student.name}</strong><small>{student.email}</small></span>)}{Number(list.studentCount || 0) > (list.students?.length || 0) && <small>+ {(Number(list.studentCount) - (list.students?.length || 0)).toLocaleString("en")} more</small>}</div><div className="student-list-actions"><button className="button button-outline button-small" onClick={() => openListEditor(list)}><Pencil size={13} /> Edit list</button><button className="button button-outline button-small" onClick={() => deleteList(list)} disabled={busy}><Trash2 size={13} /> Delete</button></div></article>)}
-        </div> : <div className="educator-empty"><span className="educator-empty-icon"><Users size={19} /></span><h3>Build your first student list.</h3><p>Give the list a name, add each student’s name and email, and save it to your workspace.</p><button className="button button-dark" onClick={() => openListEditor()}><Plus size={15} /> Create a list</button></div>}
+        <div className="educator-section-heading"><div><span className="eyebrow">{workspaceKind === "employer" ? "CANDIDATE ROSTERS" : "CLASS ROSTERS"}</span><h2>{workspaceKind === "employer" ? "Candidate lists" : "Student lists"}</h2><p>Save names and verified account email addresses, then reuse each list for any exam.</p></div><button className="button button-dark" onClick={() => openListEditor()}><Plus size={15} /> New list</button></div>
+        {loading ? <div className="educator-loading"><LoaderCircle size={18} className="spin" /> Loading your {workspaceKind === "employer" ? "candidate" : "student"} lists…</div> : data.lists.length ? <div className="student-list-grid">
+          {data.lists.map((list) => <article className="student-list-card" key={list.id}><div className="student-list-head"><span className="student-list-icon"><Users size={17} /></span><button className="icon-button" onClick={() => openListEditor(list)} aria-label={`Edit ${list.name}`}><Pencil size={15} /></button></div><h3>{list.name}</h3><p>{Number(list.studentCount || list.students?.length || 0).toLocaleString("en")} {workspaceKind === "employer" ? "candidates" : "students"} · Updated {dateLabel(list.updatedAt)}</p><div className="student-list-preview">{list.students?.slice(0, 3).map((student) => <span key={student.id}><strong>{student.name}</strong><small>{student.email}</small></span>)}{Number(list.studentCount || 0) > (list.students?.length || 0) && <small>+ {(Number(list.studentCount) - (list.students?.length || 0)).toLocaleString("en")} more</small>}</div><div className="student-list-actions"><button className="button button-outline button-small" onClick={() => openListEditor(list)}><Pencil size={13} /> Edit list</button><button className="button button-outline button-small" onClick={() => deleteList(list)} disabled={busy}><Trash2 size={13} /> Delete</button></div></article>)}
+        </div> : <div className="educator-empty"><span className="educator-empty-icon"><Users size={19} /></span><h3>{workspaceKind === "employer" ? "Build your first candidate list." : "Build your first student list."}</h3><p>Give the list a name, add each {workspaceKind === "employer" ? "candidate’s" : "student’s"} name and email, and save it to your workspace.</p><button className="button button-dark" onClick={() => openListEditor()}><Plus size={15} /> Create a list</button></div>}
       </section>}
 
       {tab === "results" && <section className="educator-section">
-        <div className="educator-section-heading"><div><span className="eyebrow">STUDENT PROGRESS</span><h2>Exam results</h2><p>Each submitted score is saved with the student, exam, and subject.</p></div><label className="educator-search"><Users size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a student or exam" aria-label="Search results" /></label></div>
-        {resultsLoading && !results.length ? <div className="educator-loading"><LoaderCircle size={18} className="spin" /> Loading results…</div> : visibleResults.length ? <><div className="educator-results-table-wrap"><table className="educator-results-table"><thead><tr><th>STUDENT</th><th>EXAM</th><th>SUBJECT</th><th>RESULT</th><th>SUBMITTED</th></tr></thead><tbody>{visibleResults.map((result) => <tr key={`${result.assignmentId}-${result.id}`}><td><strong>{result.name}</strong><small>{result.email}</small></td><td>{result.examTitle}</td><td>{result.subject || "—"}</td><td><span className="score-pill">{result.score}%</span><small>{result.earned} / {result.totalPoints} points</small></td><td>{dateLabel(result.submittedAt)}</td></tr>)}</tbody></table></div>{resultData.hasMore && <div className="educator-load-more"><button className="button button-outline" onClick={() => loadResults(resultData.nextCursor, true)} disabled={resultsLoading}><ArrowRight size={15} /> {resultsLoading ? "Loading…" : "Load more results"}</button></div>}</> : <div className="educator-empty"><span className="educator-empty-icon"><Check size={19} /></span><h3>No results yet.</h3><p>When a student finishes an assigned exam, their name, email, subject, and score will appear here.</p></div>}
+        <div className="educator-section-heading"><div><span className="eyebrow">{workspaceKind === "employer" ? "CANDIDATE PROGRESS" : "STUDENT PROGRESS"}</span><h2>Exam results</h2><p>Every attempt is saved with the {workspaceKind === "employer" ? "candidate" : "student"}, exam, subject, and pass target.</p></div><label className="educator-search"><Users size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Find a ${workspaceKind === "employer" ? "candidate" : "student"} or exam`} aria-label="Search results" /></label></div>
+        {resultsLoading && !results.length ? <div className="educator-loading"><LoaderCircle size={18} className="spin" /> Loading results…</div> : visibleResults.length ? <>
+          <div className="educator-results-table-wrap"><table className="educator-results-table"><thead><tr><th>{workspaceKind === "employer" ? "CANDIDATE" : "STUDENT"}</th><th>EXAM</th><th>SUBJECT / ROLE</th><th>RESULT</th><th>ATTEMPT</th><th>STATUS</th><th>SUBMITTED</th></tr></thead><tbody>{visibleResults.map((result) => <tr key={`${result.assignmentId}-${result.id}`}><td><strong>{result.name}</strong><small>{result.email}</small></td><td>{result.examTitle}</td><td>{result.subject || "—"}</td><td><span className="score-pill">{result.score}%</span><small>{result.earned} / {result.totalPoints} points · target {result.passingScore ?? 70}%</small></td><td>#{result.attemptNumber || 1}</td><td><span className={`result-status ${result.passed ? "result-status-passed" : ""}`}>{result.passed ? "Passed" : workspaceKind === "employer" ? "Below target" : "Keep practicing"}</span></td><td>{dateLabel(result.submittedAt)}</td></tr>)}</tbody></table></div>
+          {resultData.hasMore && <div className="educator-load-more"><button className="button button-outline" onClick={() => loadResults(resultData.nextCursor, true)} disabled={resultsLoading}><ArrowRight size={15} /> {resultsLoading ? "Loading…" : "Load more results"}</button></div>}
+        </> : <div className="educator-empty"><span className="educator-empty-icon"><Check size={19} /></span><h3>No results yet.</h3><p>When a student or candidate finishes an assigned exam, every attempt appears here.</p></div>}
+        {workspaceKind === "employer" && <p className="educator-privacy-note"><Check size={14} /> Scores support your team’s review; iTest does not make hiring decisions.</p>}
       </section>}
 
       {listDialog && <div className="educator-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setListDialog(null); }}>
         <form className="educator-modal" onSubmit={saveList}>
           <button type="button" className="icon-button educator-modal-close" onClick={() => setListDialog(null)} aria-label="Close list editor"><X size={18} /></button>
-          <span className="eyebrow">STUDENT ROSTER</span><h2>{listDialog === "new" ? "Create a list." : "Edit your list."}</h2><p>Names and email addresses are private to your educator account. Each list supports up to 1,000 students.</p>
+          <span className="eyebrow">{workspaceKind === "employer" ? "CANDIDATE ROSTER" : "STUDENT ROSTER"}</span><h2>{listDialog === "new" ? "Create a list." : "Edit your list."}</h2><p>Names and email addresses are private to your workspace. Each list supports up to 1,000 {workspaceKind === "employer" ? "candidates" : "students"}.</p>
           <label className="field"><span>List name</span><input value={listName} onChange={(event) => setListName(event.target.value)} placeholder="e.g. Biology 101 · Spring" maxLength={100} required /></label>
-          <div className="student-editor-head"><strong>Students</strong><span>{students.length} rows</span></div>
+          <div className="student-editor-head"><strong>{workspaceKind === "employer" ? "Candidates" : "Students"}</strong><span>{students.length} rows</span></div>
           <div className="student-import"><label className="field"><span>Paste a roster (name, email)</span><textarea value={studentImport} onChange={(event) => setStudentImport(event.target.value)} placeholder={'Name, email\nAvery Chen, avery@example.com\nJordan Lee, jordan@example.com'} rows={4} /></label><button type="button" className="button button-outline button-small" onClick={importStudents} disabled={!studentImport.trim()}><FileUp size={14} /> Add pasted rows</button></div>
-          <div className="student-editor-rows">{students.map((student, index) => <div className="student-editor-row" key={student.id || index}><label className="field"><span>Name</span><input value={student.name} onChange={(event) => setStudents((current) => current.map((item, row) => row === index ? { ...item, name: event.target.value } : item))} placeholder="Student name" maxLength={100} /></label><label className="field"><span>Email</span><input type="email" value={student.email} onChange={(event) => setStudents((current) => current.map((item, row) => row === index ? { ...item, email: event.target.value } : item))} placeholder="student@example.com" maxLength={254} /></label><button type="button" className="icon-button" onClick={() => setStudents((current) => current.filter((_, row) => row !== index))} aria-label={`Remove student ${index + 1}`}><Trash2 size={15} /></button></div>)}</div>
-          <button type="button" className="educator-add-student" onClick={() => setStudents((current) => [...current, { id: crypto.randomUUID(), name: "", email: "" }])}><Plus size={15} /> Add a student</button>
+          <div className="student-editor-rows">{students.map((student, index) => <div className="student-editor-row" key={student.id || index}><label className="field"><span>Name</span><input value={student.name} onChange={(event) => setStudents((current) => current.map((item, row) => row === index ? { ...item, name: event.target.value } : item))} placeholder={workspaceKind === "employer" ? "Candidate name" : "Student name"} maxLength={100} /></label><label className="field"><span>Email</span><input type="email" value={student.email} onChange={(event) => setStudents((current) => current.map((item, row) => row === index ? { ...item, email: event.target.value } : item))} placeholder="student@example.com" maxLength={254} /></label><button type="button" className="icon-button" onClick={() => setStudents((current) => current.filter((_, row) => row !== index))} aria-label={`Remove ${workspaceKind === "employer" ? "candidate" : "student"} ${index + 1}`}><Trash2 size={15} /></button></div>)}</div>
+          <button type="button" className="educator-add-student" onClick={() => setStudents((current) => [...current, { id: crypto.randomUUID(), name: "", email: "" }])}><Plus size={15} /> Add a {workspaceKind === "employer" ? "candidate" : "student"}</button>
           <div className="educator-modal-actions"><button type="button" className="button button-outline" onClick={() => setListDialog(null)} disabled={busy}>Cancel</button><button className="button button-dark" disabled={busy || !listName.trim()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Save list</button></div>
         </form>
       </div>}

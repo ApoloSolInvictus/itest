@@ -11,9 +11,10 @@ iTest is a responsive study workspace for creating exams from a topic or uploade
 - Timed digital exams, answer explanations, and short-answer grading.
 - Exam downloads as print-ready PDF, Word-compatible `.doc`, or `.txt`.
 - Study desk for questions grounded in selected source documents.
-- Educator-only workspace with saved student lists, exam invitations, multiple unique exam links, and student results.
-- Public timed exam pages that receive name and email, grade on the server, and keep answer keys private.
-- Student submissions are accepted only for an email on that assignment’s saved invitation list; each invited email can submit once.
+- Educator and hiring workspaces with saved rosters, exam invitations, passing thresholds, and result history.
+- Public timed exam pages authenticate students and keep answer keys private.
+- Invited students sign in with the same verified email address as the roster. Opening the invitation adds its teacher, subject, exam, and score history to their own workspace.
+- Each retry draws a new question selection from the saved exam when its question bank allows it, and shuffles question and option order. Students can retry until they meet the passing score; all attempts remain visible to both workspaces.
 - Responsive layouts for desktop, tablet, and mobile.
 - Demo workspace when Firebase is not configured. Demo records stay in the current browser and are clearly marked.
 
@@ -31,11 +32,11 @@ AI generation and legacy `.doc` extraction use Vercel functions. To run those lo
 1. Create a Firebase project and register a Web App.
 2. Enable Email/Password and Google providers in Authentication. Add your local host and deployed domain to authorized domains.
 3. Create a Firestore database and a Storage bucket.
-4. Publish `firestore.rules` and `storage.rules` in the Firebase console.
+4. Deploy `firestore.rules` and `storage.rules` with Firebase CLI (`firebase deploy --only firestore,storage`), or publish the same files in the Firebase console. Paginated educator queries use snapshot cursors and do not need custom composite indexes.
 5. Add the Web App values to `.env.local` or Vercel. These `VITE_FIREBASE_*` values are client configuration, not service-account credentials.
 6. Set `VITE_FIREBASE_PROJECT_ID` in Vercel. The OpenAI and DOC extraction routes verify Firebase ID tokens against Google's signing certificates.
 7. For educator assignments, add the Firebase service account JSON as `FIREBASE_SERVICE_ACCOUNT_JSON` in Vercel. The Admin SDK uses it only in server functions for private Firestore operations and result grading.
-8. Enable educator access for approved accounts with the admin script below. Educator status is a Firebase custom claim; users cannot grant it to themselves.
+8. Enable educator or hiring access for approved accounts with the admin scripts below. Workspace roles are Firebase custom claims; users cannot grant them to themselves.
 
 The Firestore and Storage rules limit user records and uploaded files to the authenticated user’s own UID path.
 
@@ -72,11 +73,19 @@ node scripts/grant-educator.mjs educator@example.com
 
 The user must sign out and sign back in so Firebase refreshes the custom claim. Never commit the service account file. The Vercel runtime uses the same credentials from `FIREBASE_SERVICE_ACCOUNT_JSON`.
 
+For an approved HR account, use the same secure Admin SDK setup and run:
+
+```powershell
+node scripts/grant-employer.mjs hiring@example.com
+```
+
+Hiring scores are assessment evidence for human review; iTest does not make employment decisions.
+
 ### Email invitations
 
 Invitations are sent using Resend’s batch email API, with one separate message per student. Verify the sender domain in Resend, then set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in Vercel. If those values are missing, iTest still creates a shareable exam link, but it does not claim that invitations were sent; the educator can copy the link and send again after configuring email. Email volume is subject to the Resend account’s limits.
 
-Each link uses a high-entropy random token and can be created independently for an exam and student list. A list supports up to 1,000 students; the assignment keeps a private snapshot of its invited students, so editing a reusable list does not change an existing exam’s roster. The public exam endpoint returns only questions and options. The answer key stays in the educator’s private assignment record; submissions are graded by a server function and written to that educator’s Firestore workspace. Results and exam links load in pages so large classes do not overwhelm the dashboard.
+Each link uses a high-entropy random token and can be created independently for an exam and roster. A list supports up to 1,000 people; the assignment keeps a private snapshot of its invitees, so editing a reusable list does not change an existing roster. Opening a link requires a verified Firebase account whose email matches that snapshot. The answer key stays in the creator’s private assignment record; submissions are graded by a server function and written to both Firestore workspaces. Each retry stays within the same assignment, draws a randomized selection/order, and stops when the configured passing score is reached. Results and exam links load in pages so large classes do not overwhelm the dashboards.
 
 ## Document handling
 
@@ -85,7 +94,8 @@ PDF and DOCX text is extracted in the browser. Legacy binary DOC extraction is d
 ## Data paths
 
 - Firestore: `users/{uid}`, with subcollections `documents`, `exams`, and `attempts`.
-- Educator Firestore: `users/{uid}/mailingLists/{listId}`, `users/{uid}/assignments/{assignmentId}`, `users/{uid}/assignments/{assignmentId}/results/{resultId}`, and the paginated educator index `users/{uid}/studentResults/{resultId}`.
-- Public exam metadata: `publicExams/{shareId}` is available only through server functions, which omit answer keys from student responses. Timed sessions are stored privately at `users/{uid}/assignments/{assignmentId}/sessions/{emailHash}` and checked when a student submits.
+- Creator Firestore: `users/{uid}/mailingLists/{listId}`, `users/{uid}/assignments/{assignmentId}`, `users/{uid}/assignments/{assignmentId}/results/{resultId}`, and `users/{uid}/studentResults/{resultId}`.
+- Student Firestore: invited exams are linked at `users/{studentUid}/assignedExams/{assignmentKey}`, with attempt history in its `attempts` subcollection. This workspace index contains no answer keys.
+- Public exam metadata: `publicExams/{shareId}` is available only through authenticated server functions, which omit answer keys from student responses. Enrollments and timed sessions are stored privately under each creator assignment and checked when a student submits.
 - Firebase Storage: `users/{uid}/documents/{fileName}`.
-- Vercel Functions: `/api/ai` and `/api/extract-doc` require a Firebase ID token; `/api/educator` also requires the educator custom claim. `/api/public-exam`, `/api/start-exam`, and `/api/submit-exam` handle the timed student exam and result. A per-instance request limit helps prevent accidental bursts.
+- Vercel Functions: `/api/ai` and `/api/extract-doc` require a Firebase ID token; `/api/educator` requires the `educator` or `employer` custom claim; `/api/student` and the timed exam routes require a verified invited email. A per-instance request limit helps prevent accidental bursts.

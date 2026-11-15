@@ -6,7 +6,8 @@ service cloud.firestore {
     }
 
     function isEducator(userId) {
-      return isOwner(userId) && request.auth.token.educator == true;
+      return isOwner(userId)
+        && (request.auth.token.educator == true || request.auth.token.employer == true);
     }
 
     match /users/{userId} {
@@ -24,6 +25,15 @@ service cloud.firestore {
       }
       match /attempts/{attemptId} {
         allow read, write: if isOwner(userId);
+      }
+      match /assignedExams/{assignmentKey} {
+        allow read: if isOwner(userId);
+        allow write: if false;
+
+        match /attempts/{attemptId} {
+          allow read: if isOwner(userId);
+          allow write: if false;
+        }
       }
       match /mailingLists/{listId} {
         allow read: if isEducator(userId);
