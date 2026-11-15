@@ -2,8 +2,15 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
+  "rewrites": [
+    { "source": "/exam/:shareId", "destination": "/" }
+  ],
   "functions": {
     "api/ai.js": { "maxDuration": 60 },
-    "api/extract-doc.js": { "maxDuration": 30 }
+    "api/extract-doc.js": { "maxDuration": 30 },
+    "api/educator.js": { "maxDuration": 60 },
+    "api/start-exam.js": { "maxDuration": 15 },
+    "api/public-exam.js": { "maxDuration": 15 },
+    "api/submit-exam.js": { "maxDuration": 30 }
   }
 }

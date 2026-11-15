@@ -4,6 +4,9 @@ dist/
 .env
 .env.*
 !.env.example
+firebase-admin*.json
+*-firebase-adminsdk-*.json
+service-account*.json
 npm-debug.log*
 *.local
 .DS_Store

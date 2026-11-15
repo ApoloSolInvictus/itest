@@ -1,8 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isEducator(userId) {
+      return isOwner(userId) && request.auth.token.educator == true;
+    }
+
     match /users/{userId} {
-      allow read, create, update: if request.auth != null && request.auth.uid == userId;
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'updatedAt']);
       allow delete: if false;
 
       match /documents/{documentId} {
@@ -12,8 +23,32 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
       match /attempts/{attemptId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read, write: if isOwner(userId);
       }
+      match /mailingLists/{listId} {
+        allow read: if isEducator(userId);
+        allow write: if false;
+      }
+      match /studentResults/{resultId} {
+        allow read: if isEducator(userId);
+        allow write: if false;
+      }
+      match /assignments/{assignmentId} {
+        allow read: if isEducator(userId);
+        allow write: if false;
+
+        match /results/{resultId} {
+          allow read: if isEducator(userId);
+          allow write: if false;
+        }
+        match /sessions/{sessionId} {
+          allow read, write: if false;
+        }
+      }
+    }
+
+    match /publicExams/{shareId} {
+      allow read, write: if false;
     }
   }
 }

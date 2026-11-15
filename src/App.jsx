@@ -18,12 +18,14 @@ import { deleteObject, ref, uploadBytes } from "firebase/storage";
 import { auth, db, firebaseReady, storage } from "./lib/firebase.js";
 import { callAi } from "./lib/ai.js";
 import { extractDocumentText } from "./lib/documents.js";
+import EducatorWorkspace from "./EducatorWorkspace.jsx";
 
 const DEMO_KEY = "itest-demo-v1";
 const NAV_ITEMS = [
   { id: "overview", label: "Overview", icon: Home },
   { id: "create", label: "Create an exam", icon: Sparkles },
   { id: "practice", label: "Exam room", icon: Timer },
+  { id: "educator", label: "Educator workspace", icon: GraduationCap },
   { id: "study", label: "Study & research", icon: Lightbulb },
   { id: "library", label: "My documents", icon: Library }
 ];
@@ -245,6 +247,8 @@ function App() {
   const [screen, setScreen] = useState("landing");
   const [section, setSection] = useState("overview");
   const [user, setUser] = useState(null);
+  const [isEducator, setIsEducator] = useState(false);
+  const [createReturnSection, setCreateReturnSection] = useState("practice");
   const [demo, setDemo] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState("login");
@@ -259,6 +263,7 @@ function App() {
   const [printExam, setPrintExam] = useState(null);
   const finishExamRef = useRef(null);
   const gradingRef = useRef(false);
+  const authUidRef = useRef(null);
 
   function notify(message, type = "success") {
     setToast({ message, type });
@@ -268,9 +273,16 @@ function App() {
 
   useEffect(() => {
     if (!auth) return undefined;
-    return onAuthStateChanged(auth, (currentUser) => {
+    return onAuthStateChanged(auth, async (currentUser) => {
+      authUidRef.current = currentUser?.uid || null;
       setUser(currentUser);
       if (currentUser) {
+        try {
+          const tokenResult = await currentUser.getIdTokenResult(true);
+          if (authUidRef.current === currentUser.uid) setIsEducator(tokenResult.claims.educator === true);
+        } catch {
+          if (authUidRef.current === currentUser.uid) setIsEducator(false);
+        }
         setDemo(false);
         setScreen("dashboard");
         setDoc(doc(db, "users", currentUser.uid), {
@@ -281,6 +293,7 @@ function App() {
           updatedAt: Date.now()
         }, { merge: true }).catch(() => {});
       } else {
+        setIsEducator(false);
         setDemo(false);
         setScreen("landing");
       }
@@ -332,6 +345,11 @@ function App() {
     setScreen("dashboard");
     setSection("overview");
     notify("Sample workspace opened. Demo content stays in this browser.", "info");
+  }
+
+  function openExamBuilder(returnTo = "practice") {
+    setCreateReturnSection(returnTo);
+    setSection("create");
   }
 
   function signedIn(signedInUser) {
@@ -427,7 +445,8 @@ function App() {
       await saveToCollection("exams", exam.id, exam);
       setActiveExam(exam);
       setExamSession(null);
-      setSection("practice");
+      setSection(createReturnSection);
+      setCreateReturnSection("practice");
       notify("Your exam is ready.");
     } catch (error) {
       notify(error.message || "Could not create this exam.", "error");
@@ -521,6 +540,7 @@ function App() {
   const displayName = user?.displayName || user?.email?.split("@")[0] || "Alex Morgan";
   const firstName = displayName.split(" ")[0];
   const matchingExams = exams.filter((exam) => `${exam.title || ""} ${exam.subject || ""}`.toLowerCase().includes(query.toLowerCase()));
+  const visibleNavItems = NAV_ITEMS.filter((item) => item.id !== "educator" || isEducator);
 
   return (
     <div className="app-shell">
@@ -529,9 +549,9 @@ function App() {
         <div className="workspace-switch"><div className="workspace-avatar">{demo ? "S" : (firstName[0] || "i").toUpperCase()}</div><span><strong>{demo ? "Sample workspace" : `${firstName}’s workspace`}</strong><small>{demo ? "PREVIEW MODE" : "PERSONAL SPACE"}</small></span><ChevronDown size={15} /></div>
         <span className="sidebar-label">WORKSPACE</span>
         <nav className="side-nav" aria-label="Workspace">
-          {NAV_ITEMS.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
-            return <button key={item.id} className={`nav-item ${section === item.id ? "active" : ""}`} onClick={() => { setSection(item.id); setSidebarOpen(false); }}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span>{item.id === "create" && <span className="nav-kbd">⌘ K</span>}</button>;
+            return <button key={item.id} className={`nav-item ${section === item.id ? "active" : ""}`} onClick={() => { if (item.id === "create") openExamBuilder("practice"); else setSection(item.id); setSidebarOpen(false); }}><Icon size={18} strokeWidth={1.8} /><span>{item.label}</span>{item.id === "create" && <span className="nav-kbd">⌘ K</span>}</button>;
           })}
         </nav>
         <div className="sidebar-bottom">
@@ -546,7 +566,7 @@ function App() {
       <main className="main-panel">
         <header className="dashboard-header">
           <button className="icon-button mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu size={20} /></button>
-          <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{NAV_ITEMS.find((item) => item.id === section)?.label || "Overview"}</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><strong>{visibleNavItems.find((item) => item.id === section)?.label || "Overview"}</strong></div>
           <div className="header-right">
             <label className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search exams" aria-label="Search exams" /><kbd>⌘ K</kbd></label>
             <TranslateMenu />
@@ -558,8 +578,9 @@ function App() {
         {demo && <div className="demo-banner"><div><Sparkles size={16} /><span><strong>Sample workspace</strong> — explore the product with local demo data.</span></div><button onClick={() => { setAuthMode("signup"); setAuthOpen(true); }}>Connect your account <ArrowRight size={14} /></button></div>}
 
         <div className="page-content">
-          {section === "overview" && <Overview firstName={firstName} exams={matchingExams} documents={documents} attempts={attempts} setSection={setSection} setActiveExam={setActiveExam} onCreate={() => setSection("create")} onOpenExam={(exam) => { setActiveExam(exam); setSection("practice"); }} />}
+          {section === "overview" && <Overview firstName={firstName} exams={matchingExams} documents={documents} attempts={attempts} setSection={setSection} setActiveExam={setActiveExam} onCreate={() => openExamBuilder("practice")} onOpenExam={(exam) => { setActiveExam(exam); setSection("practice"); }} />}
           {section === "create" && <CreateExam documents={documents} onUpload={uploadFiles} onGenerate={createExam} notify={notify} />}
+          {section === "educator" && isEducator && user && <EducatorWorkspace user={user} exams={exams} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
           {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} />}
           {section === "study" && <StudyDesk documents={documents} onAsk={askTutor} notify={notify} />}
           {section === "practice" && <ExamRoom exams={matchingExams} activeExam={activeExam} session={examSession} setSession={setExamSession} onCreate={() => setSection("create")} onStart={(exam) => { setActiveExam(exam); setExamSession({ exam, answers: {}, remainingSeconds: (Number(exam.durationMinutes) || 20) * 60, finished: false }); }} onSubmit={() => finishExam(examSession)} onExport={exportExam} />}

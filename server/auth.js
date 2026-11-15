@@ -51,7 +51,12 @@ export async function requireUser(request) {
       || typeof payload.auth_time !== "number" || payload.auth_time > now + 60) {
       throw new Error("Invalid Firebase token claims.");
     }
-    return { uid: payload.sub };
+    return {
+      uid: payload.sub,
+      email: typeof payload.email === "string" ? payload.email : "",
+      name: typeof payload.name === "string" ? payload.name : "",
+      educator: payload.educator === true
+    };
   } catch {
     const error = new Error("Your session has expired. Sign in again.");
     error.status = 401;
@@ -59,8 +64,25 @@ export async function requireUser(request) {
   }
 }
 
+export async function requireEducator(request) {
+  const user = await requireUser(request);
+  if (!user.educator) {
+    const error = new Error("This workspace is available to verified educators only.");
+    error.status = 403;
+    throw error;
+  }
+  return user;
+}
+
 export function consumeUserQuota(uid, action) {
-  const limits = { "generate-exam": 10, study: 35, grade: 20, "extract-doc": 20 };
+  const limits = {
+    "generate-exam": 10,
+    study: 35,
+    grade: 20,
+    "extract-doc": 20,
+    "educator-write": 100,
+    "educator-email": 100
+  };
   const limit = limits[action];
   if (!limit) return;
   const day = new Date().toISOString().slice(0, 10);
@@ -76,6 +98,28 @@ export function consumeUserQuota(uid, action) {
     for (const savedKey of usage.keys()) {
       usage.delete(savedKey);
       if (usage.size <= 20000) break;
+    }
+  }
+}
+
+const publicUsage = new Map();
+
+export function consumePublicQuota(request, shareId) {
+  const forwardedFor = request.headers?.["x-forwarded-for"] || request.headers?.["X-Forwarded-For"] || "";
+  const ip = String(forwardedFor).split(",")[0].trim().slice(0, 80) || "unknown";
+  const window = Math.floor(Date.now() / (15 * 60 * 1000));
+  const key = `${window}:${ip}:${shareId}`;
+  const used = publicUsage.get(key) || 0;
+  if (used >= 100) {
+    const error = new Error("Too many attempts. Please wait and try again.");
+    error.status = 429;
+    throw error;
+  }
+  publicUsage.set(key, used + 1);
+  if (publicUsage.size > 25000) {
+    for (const savedKey of publicUsage.keys()) {
+      publicUsage.delete(savedKey);
+      if (publicUsage.size <= 20000) break;
     }
   }
 }
