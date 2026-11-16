@@ -94,7 +94,7 @@ async function loadSourceMaterials(userId, rawIds, legacySourceText = "") {
       const data = snapshot.data() || {};
       let text = String(data.text || "");
       if (data.extractionStatus === "needs_ocr") {
-        throw requestError(`“${String(data.name || "This PDF").slice(0, 100)}” has no selectable text. Upload a searchable/OCR copy before using it.`, 422);
+        throw requestError(`No text could be recognized in “${String(data.name || "this PDF").slice(0, 100)}”. Retry OCR with another language or upload a searchable copy.`, 422);
       }
       if (data.textStoragePath) {
         const expectedPath = `users/${userId}/documents/${snapshot.id}.txt`;

@@ -37,6 +37,53 @@ const PROFILE_OPTIONS = [
   { id: "educator", label: "Educator", description: "Create assignments and track classes.", icon: GraduationCap },
   { id: "employer", label: "HR & hiring", description: "Assess candidates and review results.", icon: Target }
 ];
+const DEFAULT_OCR_LANGUAGE = "eng+spa";
+const OCR_LANGUAGE_OPTIONS = [
+  { value: "eng+spa", label: "English + Spanish" },
+  { value: "eng", label: "English" },
+  { value: "spa", label: "Spanish" },
+  { value: "por", label: "Portuguese" },
+  { value: "fra", label: "French" },
+  { value: "deu", label: "German" },
+  { value: "ita", label: "Italian" },
+  { value: "nld", label: "Dutch" },
+  { value: "rus", label: "Russian" },
+  { value: "ara", label: "Arabic" },
+  { value: "hin", label: "Hindi" },
+  { value: "jpn", label: "Japanese" },
+  { value: "kor", label: "Korean" },
+  { value: "chi_sim", label: "Chinese (simplified)" }
+];
+
+function getDocumentUploadError(error) {
+  const code = String(error?.code || "");
+  const detail = `${error?.message || ""} ${error?.customData?.serverResponse || ""}`;
+  if (/billing|blaze|billing account|payment|402/i.test(detail)) {
+    return "Firebase Storage is blocked by the project’s billing plan. Check Firebase Console → Storage → Usage and billing; Storage now requires the Blaze plan.";
+  }
+  if (code === "storage/unauthorized") {
+    return "Firebase Storage denied this upload. Check that the deployed rules allow the signed-in user under users/{uid}/documents/{fileName}, and confirm the Firebase project is on the Blaze plan.";
+  }
+  if (/403/.test(detail)) {
+    return "Firebase Storage returned 403. Check both the Storage Rules for this signed-in user and the Firebase project billing plan (Blaze is required for Storage).";
+  }
+  if (code === "storage/bucket-not-found") {
+    return "The Firebase Storage bucket was not found. Check VITE_FIREBASE_STORAGE_BUCKET in Vercel and confirm Storage is enabled for that Firebase project.";
+  }
+  if (code === "storage/project-not-found") {
+    return "Firebase could not find this project. Check the project ID and Storage bucket configured for the Vercel deployment.";
+  }
+  if (code === "storage/object-not-found") {
+    return "The original file is missing from Firebase Storage. Upload the document again to rebuild its text index.";
+  }
+  if (code === "storage/unauthenticated") {
+    return "Your Firebase session expired. Sign in again, then retry the upload.";
+  }
+  if (code === "storage/retry-limit-exceeded") {
+    return "The upload timed out. Check the connection and try again.";
+  }
+  return `${error?.message || "The document could not be uploaded."}${code ? ` (${code})` : ""}`;
+}
 
 function starterExam() {
   return {
@@ -337,7 +384,7 @@ function App() {
   function notify(message, type = "success") {
     setToast({ message, type });
     window.clearTimeout(notify.timer);
-    notify.timer = window.setTimeout(() => setToast(null), 4200);
+    notify.timer = window.setTimeout(() => setToast(null), type === "error" ? 12_000 : type === "info" ? 8_000 : 4_200);
   }
 
   function openAuth(profile = "", mode = "login") {
@@ -466,11 +513,15 @@ function App() {
     setSection("overview");
   }
 
-  async function uploadFiles(fileList) {
+  async function uploadFiles(fileList, ocrLanguage = DEFAULT_OCR_LANGUAGE) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    if (!user || !storage) {
+    if (!user) {
       notify("Sign in to save source documents securely to your library.", "error");
+      return;
+    }
+    if (!storage) {
+      notify("Firebase Storage is not initialized. Check VITE_FIREBASE_STORAGE_BUCKET and the Firebase web configuration in Vercel.", "error");
       return;
     }
     for (const file of files) {
@@ -484,49 +535,70 @@ function App() {
         notify(`${file.name}: this file is above the ${extension === "doc" ? "3 MB" : "10 MB"} upload limit.`, "error");
         continue;
       }
-      const uploadedPaths = [];
+      const id = crypto.randomUUID();
+      const storagePath = `users/${user.uid}/documents/${id}-${safeFileName(file.name)}`;
+      const textStoragePath = `users/${user.uid}/documents/${id}.txt`;
+      let originalUploaded = false;
+      let documentSaved = false;
       try {
-        notify(`Reading ${file.name}…`, "info");
-        const extracted = await extractDocumentText(file);
-        const needsOcr = extension === "pdf" && !extracted.hasSelectableText;
-        const text = needsOcr ? "" : extracted.text;
-        const { pageCount, unreadablePages } = extracted;
-        if (!text.trim() && !needsOcr) {
-          throw new Error(extension === "pdf"
-            ? "No selectable text was found. This PDF may be scanned; run OCR on it, then upload the searchable PDF."
-            : "No readable text was found in this file.");
-        }
-        const id = crypto.randomUUID();
-        const storagePath = `users/${user.uid}/documents/${id}-${safeFileName(file.name)}`;
-        const textStoragePath = `users/${user.uid}/documents/${id}.txt`;
+        notify(`Uploading ${file.name}…`, "info");
         await uploadBytes(ref(storage, storagePath), file, { contentType: file.type || "application/octet-stream" });
-        uploadedPaths.push(storagePath);
+        originalUploaded = true;
+        await saveToCollection("documents", id, {
+          id, name: file.name, type: extension.toUpperCase(), size: file.size,
+          storagePath, charCount: 0, pageCount: null, unreadablePages: 0, ocrPages: 0,
+          extractionStatus: "processing", extractionError: "", createdAt: Date.now()
+        });
+        documentSaved = true;
+        notify(`Reading ${file.name}…`, "info");
+        const extracted = await extractDocumentText(file, {
+          ocrLanguages: ocrLanguage,
+          onProgress: ({ stage, current, total }) => {
+            if (stage === "Recognizing scanned pages") notify(`${file.name}: OCR ${current}/${total}…`, "info");
+            else if (stage) notify(`${file.name}: ${stage}…`, "info");
+          }
+        });
+        const needsOcr = extension === "pdf" && !extracted.hasReadableText;
+        const text = needsOcr ? "" : extracted.text;
+        if (!text.trim() && !needsOcr) throw new Error("No readable text was found in this file.");
         await uploadBytes(
           ref(storage, textStoragePath),
           new Blob([text], { type: "text/plain;charset=utf-8" }),
           { contentType: "text/plain;charset=utf-8" }
         );
-        uploadedPaths.push(textStoragePath);
-        const entry = {
-          id, name: file.name, type: extension.toUpperCase(), size: file.size,
-          storagePath, textStoragePath, charCount: text.length, pageCount,
-          unreadablePages, extractionStatus: needsOcr ? "needs_ocr" : unreadablePages ? "partial" : "ready",
-          textPreview: text.slice(0, 280), createdAt: Date.now()
-        };
-        await saveToCollection("documents", id, entry);
+        await updateDoc(doc(db, "users", user.uid, "documents", id), {
+          textStoragePath,
+          charCount: text.length,
+          pageCount: extracted.pageCount,
+          unreadablePages: extracted.unreadablePages,
+          ocrPages: extracted.ocrPages,
+          extractionStatus: needsOcr ? "needs_ocr" : extracted.unreadablePages ? "partial" : "ready",
+          extractionError: String(extracted.ocrError || "").slice(0, 300),
+          textPreview: text.slice(0, 280)
+        });
         notify(needsOcr
-          ? `${file.name} is saved, but it has no selectable text. Upload a searchable/OCR copy to study from it.`
-          : unreadablePages
-            ? `${file.name} is saved, but ${unreadablePages} PDF page(s) contain no selectable text.`
-          : `${file.name} is fully indexed and ready to use.`, needsOcr || unreadablePages ? "info" : "success");
+          ? `${file.name} is uploaded, but OCR found no readable text. Check the OCR language or upload a searchable copy.`
+          : extracted.unreadablePages
+            ? `${file.name} is ready. OCR read ${extracted.ocrPages} page(s); ${extracted.unreadablePages} page(s) remain unreadable.`
+            : extracted.ocrPages
+              ? `${file.name} is ready. OCR read ${extracted.ocrPages} scanned page(s).`
+              : `${file.name} is fully indexed and ready to use.`, needsOcr || extracted.unreadablePages ? "info" : "success");
       } catch (error) {
-        await Promise.allSettled(uploadedPaths.map((path) => deleteObject(ref(storage, path))));
-        notify(`${file.name}: ${error.message || "could not be uploaded."}`, "error");
+        const message = getDocumentUploadError(error);
+        if (documentSaved) {
+          await updateDoc(doc(db, "users", user.uid, "documents", id), {
+            extractionStatus: "failed",
+            extractionError: message.slice(0, 300)
+          }).catch(() => {});
+        } else if (originalUploaded) {
+          await deleteObject(ref(storage, storagePath)).catch(() => {});
+        }
+        notify(`${file.name}: ${message}`, "error");
       }
     }
   }
 
-  async function reprocessDocument(item, { notifyUser = true } = {}) {
+  async function reprocessDocument(item, { notifyUser = true, ocrLanguage = DEFAULT_OCR_LANGUAGE } = {}) {
     if (!user || !storage || !item.storagePath) {
       throw new Error("The original file is unavailable. Upload it again to extract the complete text.");
     }
@@ -536,27 +608,39 @@ function App() {
       ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       : "application/msword";
     const file = new File([bytes], item.name, { type: mimeType });
-    const extracted = await extractDocumentText(file);
-    if (!extracted.hasSelectableText) {
-      throw new Error("No selectable text was found. This PDF may be scanned; run OCR on it, then upload the searchable PDF.");
-    }
+    const extracted = await extractDocumentText(file, {
+      ocrLanguages: ocrLanguage,
+      onProgress: ({ stage, current, total }) => {
+        if (!notifyUser || !stage) return;
+        notify(stage === "Recognizing scanned pages"
+          ? `${item.name}: OCR ${current}/${total}…`
+          : `${item.name}: ${stage}…`, "info");
+      }
+    });
+    const needsOcr = item.type === "PDF" && !extracted.hasReadableText;
+    const text = needsOcr ? "" : extracted.text;
+    if (!text.trim() && !needsOcr) throw new Error("No readable text was found in this file.");
     const textStoragePath = `users/${user.uid}/documents/${item.id}.txt`;
     await uploadBytes(
       ref(storage, textStoragePath),
-      new Blob([extracted.text], { type: "text/plain;charset=utf-8" }),
+      new Blob([text], { type: "text/plain;charset=utf-8" }),
       { contentType: "text/plain;charset=utf-8" }
     );
     await updateDoc(doc(db, "users", user.uid, "documents", item.id), {
       textStoragePath,
-      charCount: extracted.text.length,
+      charCount: text.length,
       pageCount: extracted.pageCount,
       unreadablePages: extracted.unreadablePages,
-      extractionStatus: extracted.unreadablePages ? "partial" : "ready",
-      textPreview: extracted.text.slice(0, 280),
+      ocrPages: extracted.ocrPages,
+      extractionStatus: needsOcr ? "needs_ocr" : extracted.unreadablePages ? "partial" : "ready",
+      extractionError: String(extracted.ocrError || "").slice(0, 300),
+      textPreview: text.slice(0, 280),
       text: deleteField()
     });
-    if (notifyUser) notify(`${item.name} was re-read from the original file.`);
-    return { ...item, ...extracted, textStoragePath, charCount: extracted.text.length };
+    if (notifyUser) notify(needsOcr
+      ? `${item.name} is saved, but OCR found no readable text. Check the OCR language or upload a searchable copy.`
+      : `${item.name} was re-read from the original file${extracted.ocrPages ? ` with OCR on ${extracted.ocrPages} page(s)` : ""}.`, needsOcr ? "info" : "success");
+    return { ...item, ...extracted, textStoragePath, charCount: text.length };
   }
 
   async function ensureFullTextAvailable(selected) {
@@ -757,7 +841,7 @@ function App() {
           {user && !demo && !profileType ? <ProfileSetup user={user} onComplete={(type) => { setProfileType(type); setIsEducator(type === "educator"); setIsEmployer(type === "employer"); setSection(type === "educator" || type === "employer" ? "educator" : "overview"); }} notify={notify} /> : <>
           {section === "assigned" && user && profileType === "student" && <StudentWorkspace user={user} onCreateExam={() => openExamBuilder("practice")} notify={notify} />}
           {section === "educator" && (isEducator || isEmployer) && user && <EducatorWorkspace user={user} exams={exams} workspaceKind={profileType === "employer" ? "employer" : "educator"} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
-          {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} onReprocess={(item) => reprocessDocument(item).catch((error) => notify(error.message || "Could not re-read this document.", "error"))} canReprocess={Boolean(user && storage)} />}
+          {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} onReprocess={(item, language) => reprocessDocument(item, { ocrLanguage: language }).catch((error) => notify(getDocumentUploadError(error), "error"))} canReprocess={Boolean(user && storage)} />}
           {section === "study" && <StudyDesk documents={documents} onAsk={askTutor} notify={notify} />}
           {section === "practice" && <ExamRoom exams={matchingExams} activeExam={activeExam} session={examSession} setSession={setExamSession} onCreate={() => setSection("create")} onStart={(exam) => { setActiveExam(exam); setExamSession({ exam, answers: {}, remainingSeconds: (Number(exam.durationMinutes) || 20) * 60, finished: false }); }} onSubmit={() => finishExam(examSession)} onExport={exportExam} />}
           </>}
@@ -833,7 +917,12 @@ function CreateExam({ documents, onUpload, onGenerate, notify }) {
 
           <section className="form-card"><div className="form-card-title"><span className="form-step">02</span><div><h2>Choose your format</h2><p>Set a pace and a level that fits the moment.</p></div></div><div className="form-grid"><label className="field">Number of questions <select value={form.questionCount} onChange={(event) => update("questionCount", event.target.value)}>{[5, 10, 15, 20, 25, 30].map((value) => <option key={value} value={value}>{value} questions</option>)}</select></label><label className="field">Time limit <select value={form.durationMinutes} onChange={(event) => update("durationMinutes", event.target.value)}>{[5, 10, 15, 20, 30, 45, 60, 90].map((value) => <option key={value} value={value}>{value} minutes</option>)}</select></label><label className="field">Knowledge level <select value={form.difficulty} onChange={(event) => update("difficulty", event.target.value)}><option>Foundations</option><option>Intermediate</option><option>Advanced</option><option>Graduate</option></select></label><label className="field">Thinking focus <select value={form.cognitiveFocus} onChange={(event) => update("cognitiveFocus", event.target.value)}><option>Recall</option><option>Understanding</option><option>Application</option><option>Analysis</option><option>Evaluation</option><option>Creation</option></select></label><label className="field">Question style <select value={form.questionType} onChange={(event) => update("questionType", event.target.value)}><option>Mixed</option><option>Multiple choice</option><option>True / false</option><option>Short answer</option></select></label><label className="field">Exam language <select value={form.language} onChange={(event) => update("language", event.target.value)}>{["English", "Spanish", "French", "Portuguese", "German", "Italian", "Japanese", "Korean", "Chinese", "Arabic", "Hindi", "Dutch", "Swahili"].map((language) => <option key={language}>{language}</option>)}</select></label></div></section>
 
-          <section className="form-card"><div className="form-card-title"><span className="form-step">03</span><div><h2>Ground it in your material</h2><p>Choose the documents iTest should use as its source.</p></div><span className="optional-label">OPTIONAL</span>{documents.length > 0 && <label className="add-source-button"><Plus size={13} /> Add<input type="file" accept=".pdf,.doc,.docx" multiple onChange={(event) => { onUpload(event.target.files); event.target.value = ""; }} /></label>}</div><div className="source-pick-list">{documents.length ? documents.map((item) => <label key={item.id} className={`source-pick ${sourceIds.includes(item.id) ? "source-picked" : ""}`}><input type="checkbox" checked={sourceIds.includes(item.id)} onChange={() => setSourceIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span className="source-pick-icon"><FileText size={16} /></span><span className="source-pick-name"><strong>{item.name}</strong><small>{item.type} · {formatDate(item.createdAt)}</small></span>{sourceIds.includes(item.id) && <Check size={16} />}</label>) : <div className="no-sources"><span>No source documents yet.</span><label className="text-link-small upload-inline"><Upload size={14} /> Upload a PDF or Word file<input type="file" accept=".pdf,.doc,.docx" multiple onChange={(event) => { onUpload(event.target.files); event.target.value = ""; }} /></label></div>}</div></section>
+          <section className="form-card"><div className="form-card-title"><span className="form-step">03</span><div><h2>Ground it in your material</h2><p>Choose the documents iTest should use as its source.</p></div><span className="optional-label">OPTIONAL</span>{documents.length > 0 && <label className="add-source-button"><Plus size={13} /> Add<input type="file" accept=".pdf,.doc,.docx" multiple onChange={(event) => { onUpload(event.target.files); event.target.value = ""; }} /></label>}</div><div className="source-pick-list">{documents.length ? documents.map((item) => {
+            const unavailable = ["processing", "failed", "needs_ocr"].includes(item.extractionStatus);
+            const selected = sourceIds.includes(item.id);
+            const status = item.extractionStatus === "processing" ? "Reading document…" : item.extractionStatus === "needs_ocr" ? "No readable text · retry OCR" : item.extractionStatus === "failed" ? "Read failed · open My documents" : `${item.type} · ${formatDate(item.createdAt)}`;
+            return <label key={item.id} className={`source-pick ${selected ? "source-picked" : ""} ${unavailable ? "source-pick-unavailable" : ""}`}><input type="checkbox" checked={selected} disabled={unavailable} onChange={() => setSourceIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span className="source-pick-icon"><FileText size={16} /></span><span className="source-pick-name"><strong>{item.name}</strong><small>{status}</small></span>{selected && <Check size={16} />}</label>;
+          }) : <div className="no-sources"><span>No source documents yet.</span><label className="text-link-small upload-inline"><Upload size={14} /> Upload a PDF or Word file<input type="file" accept=".pdf,.doc,.docx" multiple onChange={(event) => { onUpload(event.target.files); event.target.value = ""; }} /></label></div>}</div></section>
           <div className="builder-mobile-submit"><button className="button button-dark button-full" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />} Generate exam</button><small>Review and edit your exam after it’s created.</small></div>
         </div>
 
@@ -846,17 +935,19 @@ function CreateExam({ documents, onUpload, onGenerate, notify }) {
 function DocumentLibrary({ documents, onUpload, onRemove, onReprocess, canReprocess }) {
   const [dragging, setDragging] = useState(false);
   const [reprocessingId, setReprocessingId] = useState("");
+  const [ocrLanguage, setOcrLanguage] = useState(DEFAULT_OCR_LANGUAGE);
   async function reprocess(item) {
     setReprocessingId(item.id);
-    try { await onReprocess(item); }
+    try { await onReprocess(item, ocrLanguage); }
     finally { setReprocessingId(""); }
   }
   return (
     <div className="library-page">
       <PageHeading eyebrow="YOUR LIBRARY / 04" title="Keep your sources close." text="Store the material you study from, then bring it into a new exam when you’re ready." />
-      <label className={`upload-dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); onUpload(event.dataTransfer.files); }}>
-        <input type="file" accept=".pdf,.doc,.docx" multiple onChange={(event) => { onUpload(event.target.files); event.target.value = ""; }} />
-        <span className="upload-drop-icon"><CloudUpload size={24} /></span><strong>Drop a document here, or <span>browse files</span></strong><small>PDF, DOC, or DOCX · up to 10 MB per file (legacy DOC: 3 MB)</small>
+      <div className="ocr-language-control"><label htmlFor="ocr-language">OCR language for scanned PDFs</label><select id="ocr-language" value={ocrLanguage} onChange={(event) => setOcrLanguage(event.target.value)}>{OCR_LANGUAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>Page recognition runs in your browser.</small></div>
+      <label className={`upload-dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); onUpload(event.dataTransfer.files, ocrLanguage); }}>
+        <input type="file" accept=".pdf,.doc,.docx" multiple onChange={(event) => { onUpload(event.target.files, ocrLanguage); event.target.value = ""; }} />
+        <span className="upload-drop-icon"><CloudUpload size={24} /></span><strong>Drop a document here, or <span>browse files</span></strong><small>PDF, DOC, or DOCX · up to 10 MB (legacy DOC: 3 MB)</small><small>Scanned PDF pages are OCR'd automatically.</small>
       </label>
       <section className="library-list-card"><div className="card-heading"><div><span className="eyebrow">SOURCE MATERIAL</span><h3>{documents.length} {documents.length === 1 ? "document" : "documents"}</h3></div><span className="library-count">{documents.length.toString().padStart(2, "0")}</span></div>
         {documents.length ? <div className="document-table"><div className="document-table-head"><span>NAME</span><span>TYPE</span><span>ADDED</span><span>EXTRACTED TEXT</span><span /></div>{documents.map((item) => {
@@ -870,16 +961,22 @@ function DocumentLibrary({ documents, onUpload, onRemove, onReprocess, canReproc
             <span>{formatDate(item.createdAt)}</span>
             <span className={`doc-read-state ${isPartial ? "doc-read-partial" : ""}`} title={isPartial ? `${item.unreadablePages} PDF page(s) had no selectable text; they may be blank or scanned.` : `${(Number(item.size || 0) / 1024).toFixed(0)} KB file size`}>
               {characterCount.toLocaleString()} chars{item.pageCount ? ` · ${item.pageCount} pages` : ""}
-              {needsOcr ? <small>Upload searchable/OCR copy</small> : isPartial ? <small>{item.unreadablePages} page(s) have no text</small> : needsReprocess ? <small>Re-read for full text</small> : null}
+              {item.extractionStatus === "processing" ? <small>Reading text and OCR…</small>
+                : needsOcr ? <small>No text recognized · check language</small>
+                  : item.extractionStatus === "failed" ? <small>Upload saved · try again</small>
+                    : item.ocrPages && isPartial ? <small>OCR read {item.ocrPages}; {item.unreadablePages} page(s) still need review</small>
+                      : item.ocrPages ? <small>OCR read {item.ocrPages} page(s)</small>
+                        : isPartial ? <small>{item.unreadablePages} page(s) have no text · retry OCR</small>
+                        : needsReprocess ? <small>Re-read for full text</small> : null}
             </span>
             <span className="doc-actions">
-              {canReprocess && !needsOcr && <button className="doc-reprocess-button" disabled={reprocessingId === item.id} onClick={() => reprocess(item)}>{reprocessingId === item.id ? "Reading…" : needsReprocess ? "Re-read" : "Refresh"}</button>}
+              {canReprocess && item.extractionStatus !== "processing" && <button className="doc-reprocess-button" disabled={reprocessingId === item.id} onClick={() => reprocess(item)}>{reprocessingId === item.id ? "Reading…" : isPartial ? "Retry OCR" : needsReprocess || item.extractionStatus === "failed" ? "Re-read" : "Refresh"}</button>}
               <button className="icon-button delete-button" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`}><Trash2 size={16} /></button>
             </span>
           </div>;
         })}</div> : <EmptyState title="Your library is ready" text="Add course notes, reading materials, or a study guide to get started." />}
       </section>
-      <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Your study materials stay private.</strong> Astra reads only the documents you select for a study or exam request. Signed-in users can only access files in their own account.</span></div>
+      <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Your study materials stay private.</strong> PDF OCR runs in your browser. Astra reads only the documents you select for a study or exam request, and signed-in users can only access files in their own account.</span></div>
     </div>
   );
 }
@@ -901,7 +998,11 @@ function StudyDesk({ documents, onAsk, notify }) {
   return (
     <div className="study-page">
       <PageHeading eyebrow="STUDY DESK / 03" title="Stay curious." text="Ask a question, clarify an idea, or work through your course material." />
-      <div className="study-layout"><section className="tutor-card"><div className="tutor-header"><div className="tutor-avatar"><Sparkles size={20} /></div><div><span className="eyebrow">iTEST STUDY GUIDE</span><h2>What are you working through?</h2></div><span className="online-mark"><i /> READY</span></div><form onSubmit={submit}><label className="tutor-input-label" htmlFor="tutor-question">Ask a question or name a concept</label><textarea id="tutor-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="e.g. How does cellular respiration relate to photosynthesis?" rows={4} /><div className="tutor-controls"><details className="study-source-picker"><summary><BookMarked size={15} /><span>{sourceIds.length ? `${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} selected` : "General knowledge"}</span><ChevronDown size={13} /></summary><div className="study-source-options"><p>Select any documents Astra should use.</p>{documents.length ? documents.map((item) => <label key={item.id}><input type="checkbox" checked={sourceIds.includes(item.id)} onChange={() => setSourceIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span>{item.name}</span></label>) : <small>Add documents in My documents to study from your own material.</small>}{sourceIds.length > 0 && <button type="button" onClick={() => setSourceIds([])}>Clear selection</button>}</div></details><button className="button button-dark" disabled={busy || !question.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Send size={15} />} Ask iTest</button></div></form>
+      <div className="study-layout"><section className="tutor-card"><div className="tutor-header"><div className="tutor-avatar"><Sparkles size={20} /></div><div><span className="eyebrow">iTEST STUDY GUIDE</span><h2>What are you working through?</h2></div><span className="online-mark"><i /> READY</span></div><form onSubmit={submit}><label className="tutor-input-label" htmlFor="tutor-question">Ask a question or name a concept</label><textarea id="tutor-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="e.g. How does cellular respiration relate to photosynthesis?" rows={4} /><div className="tutor-controls"><details className="study-source-picker"><summary><BookMarked size={15} /><span>{sourceIds.length ? `${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} selected` : "General knowledge"}</span><ChevronDown size={13} /></summary><div className="study-source-options"><p>Select any documents Astra should use.</p>{documents.length ? documents.map((item) => {
+                const unavailable = ["processing", "failed", "needs_ocr"].includes(item.extractionStatus);
+                const status = item.extractionStatus === "processing" ? "Reading document…" : item.extractionStatus === "needs_ocr" ? "No readable text · retry OCR" : "Could not read · open My documents";
+                return <label key={item.id} className={unavailable ? "study-source-unavailable" : ""} title={unavailable ? status : item.name}><input type="checkbox" checked={sourceIds.includes(item.id)} disabled={unavailable} onChange={() => setSourceIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span>{item.name}{unavailable && <small>{status}</small>}</span></label>;
+              }) : <small>Add documents in My documents to study from your own material.</small>}{sourceIds.length > 0 && <button type="button" onClick={() => setSourceIds([])}>Clear selection</button>}</div></details><button className="button button-dark" disabled={busy || !question.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Send size={15} />} Ask iTest</button></div></form>
           {answer && <div className="tutor-answer"><span className="answer-label"><Sparkles size={14} /> A PLACE TO START</span><div>{answer.split("\n").map((line, index) => <p key={index}>{line || <br />}</p>)}</div><button className="text-link-small" onClick={() => { navigator.clipboard?.writeText(answer); notify("Answer copied."); }}>Copy answer</button></div>}
         </section><aside className="study-aside"><div className="study-aside-art"><span className="eyebrow">KEEP GOING</span><div className="study-orb"><div><BookOpen size={24} /></div></div><h3>Understanding<br />takes practice.</h3><p>Ask for an example, a simpler explanation, or a new way to look at a difficult idea.</p></div><div className="prompt-card"><span className="eyebrow">TRY A PROMPT</span>{["Explain this in simpler terms", "Give me a real-world example", "What should I review next?"].map((prompt) => <button key={prompt} onClick={() => setQuestion(prompt)}>{prompt}<ArrowUpRight size={14} /></button>)}</div></aside></div>
     </div>

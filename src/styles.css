@@ -340,6 +340,10 @@ a { color: inherit; text-decoration: none; }
 .builder-mobile-submit { display: none; }
 
 .library-page, .study-page, .practice-page, .create-page { padding-bottom: 22px; }
+.ocr-language-control { display: flex; align-items: center; gap: 9px; margin: 0 0 9px; color: #74776f; font-size: 9px; }
+.ocr-language-control label { color: #656861; font-weight: 600; }
+.ocr-language-control select { max-width: 190px; padding: 6px 24px 6px 9px; border: 1px solid #e4e5df; border-radius: 6px; color: #454740; background: white; font-size: 9px; }
+.ocr-language-control small { color: #999b94; font-size: 8px; }
 .upload-dropzone { min-height: 146px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; margin-bottom: 15px; border: 1px dashed #d5d8cf; border-radius: 10px; background: #fbfcf9; cursor: pointer; transition: border-color .16s ease, background .16s ease; }
 .upload-dropzone:hover, .upload-dropzone.dragging { border-color: #92a76e; background: #f4f7ee; }
 .upload-dropzone input { display: none; }
@@ -398,7 +402,9 @@ a { color: inherit; text-decoration: none; }
 .study-source-options label { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 5px; border-radius: 5px; color: #555750; font-size: 8px; cursor: pointer; }
 .study-source-options label:hover { background: #f5f6f1; }
 .study-source-options label input { accent-color: #68794a; }
-.study-source-options label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.study-source-options label span { display: grid; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.study-source-options label small { overflow: hidden; color: #96988f; font-size: 7px; text-overflow: ellipsis; }
+.study-source-options .study-source-unavailable { opacity: .58; cursor: not-allowed; }
 .study-source-options > small { color: #92948e; font-size: 8px; line-height: 1.5; }
 .study-source-options > button { justify-self: start; padding: 5px; border: 0; color: #727960; background: none; font-size: 8px; text-decoration: underline; cursor: pointer; }
 .tutor-controls .button { min-height: 35px; font-size: 10px; }
@@ -666,6 +672,10 @@ a { color: inherit; text-decoration: none; }
   .form-card-title h2 { font-size: 12px; }
   .form-card-title p { font-size: 8px; }
   .no-sources { align-items: flex-start; flex-direction: column; }
+  .ocr-language-control { align-items: flex-start; flex-wrap: wrap; gap: 7px; }
+  .ocr-language-control label { flex-basis: 100%; }
+  .ocr-language-control select { max-width: 100%; }
+  .ocr-language-control small { align-self: center; }
   .upload-dropzone { min-height: 127px; }
   .upload-dropzone strong { max-width: 90%; text-align: center; font-size: 9px; }
   .library-list-card { padding: 14px; }
@@ -675,7 +685,7 @@ a { color: inherit; text-decoration: none; }
   .doc-type { grid-column: 2; }
   .doc-actions { grid-column: 3; grid-row: 1; }
   .doc-actions .icon-button { width: 30px; height: 30px; }
-  .doc-reprocess-button { min-width: 35px; padding: 6px 4px; font-size: 6px; }
+  .doc-reprocess-button { min-width: 40px; padding: 6px 4px; font-size: 6px; }
   .document-name strong { font-size: 8px; }
   .privacy-note { align-items: flex-start; font-size: 8px; line-height: 1.6; }
   .study-layout { grid-template-columns: 1fr; }
