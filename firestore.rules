@@ -7,14 +7,23 @@ service cloud.firestore {
 
     function isEducator(userId) {
       return isOwner(userId)
-        && (request.auth.token.educator == true || request.auth.token.employer == true);
+        && (request.auth.token.educator == true
+          || request.auth.token.employer == true
+          || get(/databases/$(database)/documents/users/$(userId)).data.profileType == 'educator'
+          || get(/databases/$(database)/documents/users/$(userId)).data.profileType == 'employer');
     }
 
     match /users/{userId} {
       allow read: if isOwner(userId);
-      allow create, update: if isOwner(userId)
+      allow create: if isOwner(userId)
         && request.resource.data.uid == userId
         && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'updatedAt']);
+      allow update: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'updatedAt', 'profileType', 'createdAt'])
+        && ((!('profileType' in resource.data) && !('profileType' in request.resource.data))
+          || (request.resource.data.profileType == resource.data.profileType
+            && request.resource.data.profileType in ['student', 'educator', 'employer']));
       allow delete: if false;
 
       match /documents/{documentId} {

@@ -79,12 +79,24 @@ export async function requireVerifiedUser(request) {
 
 export async function requireEducator(request) {
   const user = await requireUser(request);
-  if (!user.educator && !user.employer) {
-    const error = new Error("This workspace is available to verified educators and hiring teams only.");
+  let profileType = user.employer ? "employer" : user.educator ? "educator" : "";
+  if (!profileType) {
+    const { getAdminServices } = await import("./admin.js");
+    const { db } = getAdminServices();
+    const profile = await db.collection("users").doc(user.uid).get();
+    profileType = profile.get("profileType") || "";
+  }
+  if (!["educator", "employer"].includes(profileType)) {
+    const error = new Error("This workspace is available to educator and hiring profiles only.");
     error.status = 403;
     throw error;
   }
-  return user;
+  return {
+    ...user,
+    educator: profileType === "educator",
+    employer: profileType === "employer",
+    workspaceType: profileType
+  };
 }
 
 export function consumeUserQuota(uid, action) {

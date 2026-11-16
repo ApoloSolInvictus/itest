@@ -9,6 +9,7 @@ import {
   signOut, updateProfile
 } from "firebase/auth";
 import { auth, firebaseReady } from "./lib/firebase.js";
+import { requestProfile } from "./lib/profile.js";
 
 function formatTime(seconds) {
   const safe = Math.max(0, Number(seconds) || 0);
@@ -72,6 +73,7 @@ export default function PublicExam({ shareId }) {
       setLoading(true);
       setError("");
       try {
+        await requestProfile(user, "student", user.displayName || "");
         const token = await user.getIdToken();
         const response = await fetch(`/api/public-exam?shareId=${encodeURIComponent(shareId)}`, {
           cache: "no-store",

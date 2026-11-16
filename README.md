@@ -5,6 +5,7 @@ iTest is a responsive study workspace for creating exams from a topic or uploade
 ## Features
 
 - Landing page and Firebase email/password or Google sign-in.
+- Separate Student, Educator, and HR & Hiring account profiles. The selected profile is saved to the user's Firestore record and determines which workspace navigation is shown.
 - Personal dashboard with exams, source documents, and practice history.
 - Exam builder with question count, time, knowledge level, thinking focus, question style, and output language.
 - PDF, legacy Word `.doc`, and `.docx` text extraction. Files are stored in Firebase Storage; extracted text is stored in the signed-in user’s Firestore workspace.
@@ -36,7 +37,7 @@ AI generation and legacy `.doc` extraction use Vercel functions. To run those lo
 5. Add the Web App values to `.env.local` or Vercel. These `VITE_FIREBASE_*` values are client configuration, not service-account credentials.
 6. Set `VITE_FIREBASE_PROJECT_ID` in Vercel. The OpenAI and DOC extraction routes verify Firebase ID tokens against Google's signing certificates.
 7. For educator assignments, add the Firebase service account JSON as `FIREBASE_SERVICE_ACCOUNT_JSON` in Vercel. The Admin SDK uses it only in server functions for private Firestore operations and result grading.
-8. Enable educator or hiring access for approved accounts with the admin scripts below. Workspace roles are Firebase custom claims; users cannot grant them to themselves.
+8. New accounts choose a Student, Educator, or HR & Hiring profile during registration. The selected profile is saved once to `users/{uid}.profileType`; existing educator and employer custom claims continue to work.
 
 The Firestore and Storage rules limit user records and uploaded files to the authenticated user’s own UID path.
 
@@ -62,16 +63,16 @@ Add these environment variables in Vercel, then redeploy:
 
 Never add an OpenAI key, Firebase service account, or Resend key with a `VITE_` prefix or commit one to Git. Use Vercel’s encrypted environment variables for server credentials. The Firebase Web App settings are public client configuration; the Admin service account is private.
 
-### Grant educator access
+### Legacy custom-claim access
 
-Educator access is controlled by the Firebase Auth custom claim `educator: true`, which is checked by the Vercel API and Firestore rules. To grant it to an approved account, download a Firebase service account key to a secure location outside the repository, then run this from PowerShell after installing dependencies:
+New registrations do not need an administrator to grant a workspace role. The Educator and HR buttons select the matching profile at signup. Existing accounts that already use Firebase custom claims remain supported. To grant legacy claim access, download a Firebase service account key to a secure location outside the repository, then run this from PowerShell after installing dependencies:
 
 ```powershell
 $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\secure\firebase-admin.json"
 node scripts/grant-educator.mjs educator@example.com
 ```
 
-The user must sign out and sign back in so Firebase refreshes the custom claim. Never commit the service account file. The Vercel runtime uses the same credentials from `FIREBASE_SERVICE_ACCOUNT_JSON`.
+For legacy claims, the user must sign out and back in so Firebase refreshes the claim. Never commit the service account file. The Vercel runtime uses the same credentials from `FIREBASE_SERVICE_ACCOUNT_JSON`.
 
 For an approved HR account, use the same secure Admin SDK setup and run:
 
@@ -98,4 +99,4 @@ PDF and DOCX text is extracted in the browser. Legacy binary DOC extraction is d
 - Student Firestore: invited exams are linked at `users/{studentUid}/assignedExams/{assignmentKey}`, with attempt history in its `attempts` subcollection. This workspace index contains no answer keys.
 - Public exam metadata: `publicExams/{shareId}` is available only through authenticated server functions, which omit answer keys from student responses. Enrollments and timed sessions are stored privately under each creator assignment and checked when a student submits.
 - Firebase Storage: `users/{uid}/documents/{fileName}`.
-- Vercel Functions: `/api/ai` and `/api/extract-doc` require a Firebase ID token; `/api/educator` requires the `educator` or `employer` custom claim; `/api/student` and the timed exam routes require a verified invited email. A per-instance request limit helps prevent accidental bursts.
+- Vercel Functions: `/api/profile` saves a one-time account profile; `/api/ai` and `/api/extract-doc` require a Firebase ID token; `/api/educator` requires an Educator/HR profile or a legacy custom claim; `/api/student` and the timed exam routes require a verified invited email. A per-instance request limit helps prevent accidental bursts.

@@ -9,6 +9,7 @@
     "api/ai.js": { "maxDuration": 60 },
     "api/extract-doc.js": { "maxDuration": 30 },
     "api/educator.js": { "maxDuration": 60 },
+    "api/profile.js": { "maxDuration": 15 },
     "api/student.js": { "maxDuration": 30 },
     "api/start-exam.js": { "maxDuration": 15 },
     "api/public-exam.js": { "maxDuration": 15 },

@@ -18,6 +18,7 @@ import { deleteObject, ref, uploadBytes } from "firebase/storage";
 import { auth, db, firebaseReady, storage } from "./lib/firebase.js";
 import { callAi } from "./lib/ai.js";
 import { extractDocumentText } from "./lib/documents.js";
+import { requestProfile } from "./lib/profile.js";
 import EducatorWorkspace from "./EducatorWorkspace.jsx";
 import StudentWorkspace from "./StudentWorkspace.jsx";
 
@@ -30,6 +31,11 @@ const NAV_ITEMS = [
   { id: "educator", label: "Educator workspace", icon: GraduationCap },
   { id: "study", label: "Study & research", icon: Lightbulb },
   { id: "library", label: "My documents", icon: Library }
+];
+const PROFILE_OPTIONS = [
+  { id: "student", label: "Student", description: "Build courses and practice exams.", icon: BookOpen },
+  { id: "educator", label: "Educator", description: "Create assignments and track classes.", icon: GraduationCap },
+  { id: "employer", label: "HR & hiring", description: "Assess candidates and review results.", icon: Target }
 ];
 
 function starterExam() {
@@ -114,7 +120,7 @@ function Landing({ onLogin, onDemo }) {
         </nav>
         <div className="landing-actions">
           <TranslateMenu landing />
-          <button className="button button-quiet" onClick={onLogin}>Sign in</button>
+          <button className="button button-quiet" onClick={() => onLogin(null, "login")}>Sign in</button>
           <button className="button button-dark button-small" onClick={onDemo}>Explore the demo <ArrowUpRight size={15} /></button>
         </div>
       </header>
@@ -126,7 +132,7 @@ function Landing({ onLogin, onDemo }) {
             <h1>Make the next<br /><span>exam count.</span></h1>
             <p className="hero-lede">Turn course material into clear, focused exams. Practice on your own time. Learn from every answer.</p>
             <div className="hero-buttons">
-              <button className="button button-dark button-large" onClick={onLogin}>Create your workspace <ArrowRight size={17} /></button>
+              <button className="button button-dark button-large" onClick={() => onLogin("student", "signup")}>Create your workspace <ArrowRight size={17} /></button>
               <a className="text-link" href="#how-it-works">See how it works <ArrowRight size={15} /></a>
             </div>
             <div className="hero-footnote"><ShieldCheck size={15} /> Your materials stay in your workspace.</div>
@@ -160,23 +166,39 @@ function Landing({ onLogin, onDemo }) {
         </section>
 
         <section className="audience-section shell" id="for-teachers">
-          <div className="audience-panel educator-panel"><span className="eyebrow">FOR EDUCATORS</span><h2>Thoughtful exams,<br />without the busywork.</h2><p>Build exams from course materials, invite verified students, set a passing score, and follow every attempt.</p><button className="button button-light" onClick={onLogin}>Open educator workspace <ArrowRight size={16} /></button><div className="panel-index">iTEST / 01</div></div>
-          <div className="audience-panel learner-panel" id="for-learners"><span className="eyebrow">FOR STUDENTS</span><h2>Practice until<br />it feels familiar.</h2><p>Build your own courses and practice exams, then keep teacher-assigned work and every score in one place.</p><button className="button button-outline-light" onClick={onDemo}>Try a sample session <ArrowRight size={16} /></button><div className="panel-index">iTEST / 02</div></div>
-          <div className="audience-panel employer-panel" id="for-employers"><span className="eyebrow">FOR HR & HIRING TEAMS</span><h2>Assess skills.<br />Keep people in the loop.</h2><p>Create role-related assessments, set a benchmark, and review each candidate’s attempts as evidence for your hiring team.</p><button className="button button-outline" onClick={onLogin}>Open hiring workspace <ArrowRight size={16} /></button><div className="panel-index">iTEST / 03</div><span className="employer-human-review">Human review stays with your team.</span></div>
+          <div className="audience-panel educator-panel"><span className="eyebrow">FOR EDUCATORS</span><h2>Thoughtful exams,<br />without the busywork.</h2><p>Build exams from course materials, invite verified students, set a passing score, and follow every attempt.</p><button className="button button-light" onClick={() => onLogin("educator", "signup")}>Create educator profile <ArrowRight size={16} /></button><div className="panel-index">iTEST / 01</div></div>
+          <div className="audience-panel learner-panel" id="for-learners"><span className="eyebrow">FOR STUDENTS</span><h2>Practice until<br />it feels familiar.</h2><p>Build your own courses and practice exams, then keep teacher-assigned work and every score in one place.</p><button className="button button-outline-light" onClick={() => onLogin("student", "signup")}>Create student profile <ArrowRight size={16} /></button><div className="panel-index">iTEST / 02</div></div>
+          <div className="audience-panel employer-panel" id="for-employers"><span className="eyebrow">FOR HR & HIRING TEAMS</span><h2>Assess skills.<br />Keep people in the loop.</h2><p>Create role-related assessments, set a benchmark, and review each candidate’s attempts as evidence for your hiring team.</p><button className="button button-outline" onClick={() => onLogin("employer", "signup")}>Create hiring profile <ArrowRight size={16} /></button><div className="panel-index">iTEST / 03</div><span className="employer-human-review">Human review stays with your team.</span></div>
         </section>
 
-        <section className="closing-cta shell"><div><span className="eyebrow">YOUR STUDY DESK, READY WHEN YOU ARE</span><h2>Start with what<br />you’re learning.</h2></div><button className="button button-dark button-large" onClick={onLogin}>Get started with iTest <ArrowUpRight size={17} /></button></section>
+      <section className="closing-cta shell"><div><span className="eyebrow">YOUR STUDY DESK, READY WHEN YOU ARE</span><h2>Start with what<br />you’re learning.</h2></div><button className="button button-dark button-large" onClick={() => onLogin("student", "signup")}>Get started with iTest <ArrowUpRight size={17} /></button></section>
       </main>
       <footer className="landing-footer shell"><Logo compact /><span>Made for curious minds.</span><span>iTest · 2026</span></footer>
     </div>
   );
 }
 
-function AuthModal({ mode, setMode, onClose, onSignedIn, notify }) {
+function AuthModal({ mode, setMode, onClose, onSignedIn, notify, initialProfileType }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [profileType, setProfileType] = useState(initialProfileType || "student");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (initialProfileType) setProfileType(initialProfileType);
+  }, [initialProfileType]);
+
+  const requestedProfileType = mode === "signup" ? profileType : initialProfileType || "";
+
+  async function completeSignIn(firebaseUser, displayName = "") {
+    const profile = await requestProfile(firebaseUser, requestedProfileType, displayName || firebaseUser.displayName || name);
+    onSignedIn(firebaseUser, profile.type);
+    if (requestedProfileType && profile.type && profile.type !== requestedProfileType) {
+      notify(`This account already has a ${profile.type} profile. We opened that workspace.`, "info");
+    }
+    return profile.type;
+  }
 
   async function submit(event) {
     event.preventDefault();
@@ -191,14 +213,17 @@ function AuthModal({ mode, setMode, onClose, onSignedIn, notify }) {
         credential = await createUserWithEmailAndPassword(auth, email, password);
         if (name.trim()) await updateProfile(credential.user, { displayName: name.trim() });
         await sendEmailVerification(credential.user, { url: window.location.origin, handleCodeInApp: false });
-        notify("Account created. Verify your email to open assigned exams.", "info");
       } else {
         credential = await signInWithEmailAndPassword(auth, email, password);
       }
-      onSignedIn(credential.user);
+      await completeSignIn(credential.user, name.trim());
+      if (mode === "signup") {
+        const roleLabel = profileType === "employer" ? "hiring" : profileType;
+        notify(`Your ${roleLabel} profile is ready. Verify your email before opening assigned exams.`, "info");
+      }
       onClose();
     } catch (error) {
-      notify(error.message || "Could not sign in. Please try again.", "error");
+      notify(error.message || "Could not save your profile. Please try again.", "error");
     } finally {
       setBusy(false);
     }
@@ -209,10 +234,10 @@ function AuthModal({ mode, setMode, onClose, onSignedIn, notify }) {
     setBusy(true);
     try {
       const credential = await signInWithPopup(auth, new GoogleAuthProvider());
-      onSignedIn(credential.user);
+      await completeSignIn(credential.user);
       onClose();
     } catch (error) {
-      notify(error.message || "Google sign in could not be completed.", "error");
+      notify(error.message || "Google sign in or profile setup could not be completed.", "error");
     } finally { setBusy(false); }
   }
 
@@ -229,36 +254,72 @@ function AuthModal({ mode, setMode, onClose, onSignedIn, notify }) {
       <section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
         <button className="icon-button modal-close" onClick={onClose} aria-label="Close"><X size={18} /></button>
         <Logo />
-        <span className="eyebrow">YOUR LEARNING SPACE</span>
-        <h2 id="auth-title">{mode === "signup" ? "Create your account." : "Welcome back."}</h2>
-        <p className="auth-subtitle">Sign in to save your materials, exams, and progress.</p>
+        <span className="eyebrow">YOUR iTEST PROFILE</span>
+        <h2 id="auth-title">{mode === "signup" ? "Choose your workspace." : "Welcome back."}</h2>
+        <p className="auth-subtitle">{mode === "signup" ? "Each account has its own workspace and tools." : "Sign in to continue to your saved workspace."}</p>
         {!firebaseReady && <div className="auth-setup-note"><AlertCircle size={17} /><span>Firebase isn’t connected yet. Set the web app values from <code>.env.example</code>, or use the sample workspace.</span></div>}
+        {mode === "signup" && <div className="profile-choice-grid" role="radiogroup" aria-label="Choose your iTest profile">
+          {PROFILE_OPTIONS.map((option) => {
+            const Icon = option.icon;
+            return <button type="button" key={option.id} className={`profile-choice ${profileType === option.id ? "selected" : ""}`} aria-pressed={profileType === option.id} onClick={() => setProfileType(option.id)}><Icon size={18} /><strong>{option.label}</strong><span>{option.description}</span></button>;
+          })}
+        </div>}
         <form onSubmit={submit} className="auth-form">
           {mode === "signup" && <label>Your name<input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Jordan Lee" /></label>}
           <label>Email address<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@school.edu" required /></label>
           <label>Password<input type="password" autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} minLength="6" placeholder="At least 6 characters" required /></label>
           {mode === "login" && <button type="button" className="forgot-link" onClick={resetPassword}>Forgot password?</button>}
-          <button className="button button-dark button-full" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : mode === "signup" ? "Create account" : "Sign in"}</button>
+          <button className="button button-dark button-full" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : mode === "signup" ? `Create ${profileType === "employer" ? "HR & hiring" : profileType} profile` : "Sign in"}</button>
         </form>
         <div className="auth-separator"><span />or<span /></div>
         <button className="button button-google button-full" onClick={googleSignIn} disabled={busy}><span className="google-g">G</span> Continue with Google</button>
         <p className="auth-switch">{mode === "signup" ? "Already have an account?" : "New to iTest?"} <button onClick={() => setMode(mode === "signup" ? "login" : "signup")}>{mode === "signup" ? "Sign in" : "Create an account"}</button></p>
-        <p className="auth-legal"><LockKeyhole size={13} /> Your workspace is private to your account.</p>
+        <p className="auth-legal"><LockKeyhole size={13} /> Your profile type is saved to your iTest account.</p>
       </section>
     </div>
   );
+}
+
+function ProfileSetup({ user, onComplete, notify }) {
+  const [busyType, setBusyType] = useState("");
+
+  async function chooseProfile(profileType) {
+    setBusyType(profileType);
+    try {
+      const profile = await requestProfile(user, profileType, user.displayName || "");
+      if (!profile.type) throw new Error("The selected profile could not be saved.");
+      onComplete(profile.type);
+      notify(`${PROFILE_OPTIONS.find((item) => item.id === profile.type)?.label || "iTest"} profile ready.`, "success");
+    } catch (error) {
+      notify(error.message || "Could not save this profile. Please try again.", "error");
+    } finally {
+      setBusyType("");
+    }
+  }
+
+  return <section className="profile-setup-page">
+    <div className="profile-setup-intro"><span className="eyebrow">ONE ACCOUNT, ONE WORKSPACE</span><h1>Choose your iTest profile.</h1><p>This account has no workspace type yet. Choose how you’ll use iTest; it will be saved to your profile.</p></div>
+    <div className="profile-setup-grid">
+      {PROFILE_OPTIONS.map((option) => {
+        const Icon = option.icon;
+        return <article className="profile-setup-card" key={option.id}><span className="profile-setup-icon"><Icon size={19} /></span><h2>{option.label}</h2><p>{option.description}</p><button className="button button-dark" onClick={() => chooseProfile(option.id)} disabled={Boolean(busyType)}>{busyType === option.id ? <LoaderCircle className="spin" size={15} /> : null}Use {option.label} workspace <ArrowRight size={15} /></button></article>;
+      })}
+    </div>
+  </section>;
 }
 
 function App() {
   const [screen, setScreen] = useState("landing");
   const [section, setSection] = useState("overview");
   const [user, setUser] = useState(null);
+  const [profileType, setProfileType] = useState("");
   const [isEducator, setIsEducator] = useState(false);
   const [isEmployer, setIsEmployer] = useState(false);
   const [createReturnSection, setCreateReturnSection] = useState("practice");
   const [demo, setDemo] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState("login");
+  const [authProfileType, setAuthProfileType] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [documents, setDocuments] = useState([]);
   const [exams, setExams] = useState([]);
@@ -271,6 +332,7 @@ function App() {
   const finishExamRef = useRef(null);
   const gradingRef = useRef(false);
   const authUidRef = useRef(null);
+  const profileRevisionRef = useRef(0);
 
   function notify(message, type = "success") {
     setToast({ message, type });
@@ -278,19 +340,37 @@ function App() {
     notify.timer = window.setTimeout(() => setToast(null), 4200);
   }
 
+  function openAuth(profile = "", mode = "login") {
+    setAuthProfileType(profile);
+    setAuthMode(firebaseReady ? mode : "signup");
+    setAuthOpen(true);
+  }
+
   useEffect(() => {
     if (!auth) return undefined;
     return onAuthStateChanged(auth, async (currentUser) => {
+      const profileRevision = ++profileRevisionRef.current;
       authUidRef.current = currentUser?.uid || null;
       setUser(currentUser);
       if (currentUser) {
+        let roleFromClaims = "";
         try {
           const tokenResult = await currentUser.getIdTokenResult(true);
-          if (authUidRef.current === currentUser.uid) setIsEducator(tokenResult.claims.educator === true);
-          if (authUidRef.current === currentUser.uid) setIsEmployer(tokenResult.claims.employer === true);
+          roleFromClaims = tokenResult.claims.employer === true ? "employer" : tokenResult.claims.educator === true ? "educator" : "";
         } catch {
-          if (authUidRef.current === currentUser.uid) setIsEducator(false);
-          if (authUidRef.current === currentUser.uid) setIsEmployer(false);
+          roleFromClaims = "";
+        }
+        let resolvedProfile = roleFromClaims;
+        try {
+          const savedProfile = await requestProfile(currentUser);
+          resolvedProfile = savedProfile.type || roleFromClaims;
+        } catch {
+          resolvedProfile = roleFromClaims;
+        }
+        if (authUidRef.current === currentUser.uid && profileRevisionRef.current === profileRevision) {
+          setProfileType(resolvedProfile);
+          setIsEducator(resolvedProfile === "educator");
+          setIsEmployer(resolvedProfile === "employer");
         }
         setDemo(false);
         setScreen("dashboard");
@@ -302,6 +382,7 @@ function App() {
           updatedAt: Date.now()
         }, { merge: true }).catch(() => {});
       } else {
+        setProfileType("");
         setIsEducator(false);
         setIsEmployer(false);
         setDemo(false);
@@ -362,16 +443,23 @@ function App() {
     setSection("create");
   }
 
-  function signedIn(signedInUser) {
+  function signedIn(signedInUser, savedProfileType = "") {
+    profileRevisionRef.current += 1;
     setUser(signedInUser);
+    setProfileType(savedProfileType);
+    setIsEducator(savedProfileType === "educator");
+    setIsEmployer(savedProfileType === "employer");
     setDemo(false);
     setScreen("dashboard");
+    setSection(savedProfileType === "educator" || savedProfileType === "employer" ? "educator" : "overview");
   }
 
   async function signOut() {
     if (user && auth) await firebaseSignOut(auth);
+    profileRevisionRef.current += 1;
     setDemo(false);
     setUser(null);
+    setProfileType("");
     setIsEducator(false);
     setIsEmployer(false);
     setScreen("landing");
@@ -543,8 +631,8 @@ function App() {
 
   if (screen === "landing") {
     return <>
-      <Landing onLogin={() => { setAuthMode(firebaseReady ? "login" : "signup"); setAuthOpen(true); }} onDemo={enterDemo} />
-      {authOpen && <AuthModal mode={authMode} setMode={setAuthMode} onClose={() => setAuthOpen(false)} onSignedIn={signedIn} notify={notify} />}
+      <Landing onLogin={(profile, mode) => openAuth(profile || "", mode || "login")} onDemo={enterDemo} />
+      {authOpen && <AuthModal mode={authMode} setMode={setAuthMode} onClose={() => setAuthOpen(false)} onSignedIn={signedIn} notify={notify} initialProfileType={authProfileType} />}
       {toast && <Toast toast={toast} />}
     </>;
   }
@@ -553,8 +641,9 @@ function App() {
   const firstName = displayName.split(" ")[0];
   const matchingExams = exams.filter((exam) => `${exam.title || ""} ${exam.subject || ""}`.toLowerCase().includes(query.toLowerCase()));
   const visibleNavItems = NAV_ITEMS.filter((item) => {
+    if (user && !demo && !profileType) return false;
     if (item.id === "educator") return isEducator || isEmployer;
-    if (item.id === "assigned") return Boolean(user);
+    if (item.id === "assigned") return Boolean(user) && profileType === "student";
     return true;
   });
 
@@ -562,7 +651,7 @@ function App() {
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-brand-row"><a href="#home" onClick={(event) => { event.preventDefault(); setSection("overview"); }}><Logo /></a><button className="icon-button sidebar-mobile-close" onClick={() => setSidebarOpen(false)} aria-label="Close menu"><X size={18} /></button></div>
-        <div className="workspace-switch"><div className="workspace-avatar">{demo ? "S" : (firstName[0] || "i").toUpperCase()}</div><span><strong>{demo ? "Sample workspace" : `${firstName}’s workspace`}</strong><small>{demo ? "PREVIEW MODE" : isEmployer && !isEducator ? "HIRING & STUDY" : "PERSONAL STUDY"}</small></span><ChevronDown size={15} /></div>
+        <div className="workspace-switch"><div className="workspace-avatar">{demo ? "S" : (firstName[0] || "i").toUpperCase()}</div><span><strong>{demo ? "Sample workspace" : `${firstName}’s workspace`}</strong><small>{demo ? "PREVIEW MODE" : profileType === "employer" ? "HIRING PROFILE" : profileType === "educator" ? "EDUCATOR PROFILE" : profileType === "student" ? "STUDENT PROFILE" : "PROFILE SETUP"}</small></span><ChevronDown size={15} /></div>
         <span className="sidebar-label">WORKSPACE</span>
         <nav className="side-nav" aria-label="Workspace">
           {visibleNavItems.map((item) => {
@@ -592,20 +681,22 @@ function App() {
           </div>
         </header>
 
-        {demo && <div className="demo-banner"><div><Sparkles size={16} /><span><strong>Sample workspace</strong> — explore the product with local demo data.</span></div><button onClick={() => { setAuthMode("signup"); setAuthOpen(true); }}>Connect your account <ArrowRight size={14} /></button></div>}
+        {demo && <div className="demo-banner"><div><Sparkles size={16} /><span><strong>Sample workspace</strong> — explore the product with local demo data.</span></div><button onClick={() => openAuth("student", "signup")}>Create your profile <ArrowRight size={14} /></button></div>}
 
         <div className="page-content">
           {section === "overview" && <Overview firstName={firstName} exams={matchingExams} documents={documents} attempts={attempts} setSection={setSection} setActiveExam={setActiveExam} onCreate={() => openExamBuilder("practice")} onOpenExam={(exam) => { setActiveExam(exam); setSection("practice"); }} />}
           {section === "create" && <CreateExam documents={documents} onUpload={uploadFiles} onGenerate={createExam} notify={notify} />}
-          {section === "assigned" && user && <StudentWorkspace user={user} onCreateExam={() => openExamBuilder("practice")} notify={notify} />}
-          {section === "educator" && (isEducator || isEmployer) && user && <EducatorWorkspace user={user} exams={exams} workspaceKind={isEmployer && !isEducator ? "employer" : "educator"} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
+          {user && !demo && !profileType ? <ProfileSetup user={user} onComplete={(type) => { setProfileType(type); setIsEducator(type === "educator"); setIsEmployer(type === "employer"); setSection(type === "educator" || type === "employer" ? "educator" : "overview"); }} notify={notify} /> : <>
+          {section === "assigned" && user && profileType === "student" && <StudentWorkspace user={user} onCreateExam={() => openExamBuilder("practice")} notify={notify} />}
+          {section === "educator" && (isEducator || isEmployer) && user && <EducatorWorkspace user={user} exams={exams} workspaceKind={profileType === "employer" ? "employer" : "educator"} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
           {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} />}
           {section === "study" && <StudyDesk documents={documents} onAsk={askTutor} notify={notify} />}
           {section === "practice" && <ExamRoom exams={matchingExams} activeExam={activeExam} session={examSession} setSession={setExamSession} onCreate={() => setSection("create")} onStart={(exam) => { setActiveExam(exam); setExamSession({ exam, answers: {}, remainingSeconds: (Number(exam.durationMinutes) || 20) * 60, finished: false }); }} onSubmit={() => finishExam(examSession)} onExport={exportExam} />}
+          </>}
         </div>
       </main>
 
-      {authOpen && <AuthModal mode={authMode} setMode={setAuthMode} onClose={() => setAuthOpen(false)} onSignedIn={signedIn} notify={notify} />}
+      {authOpen && <AuthModal mode={authMode} setMode={setAuthMode} onClose={() => setAuthOpen(false)} onSignedIn={signedIn} notify={notify} initialProfileType={authProfileType} />}
       {toast && <Toast toast={toast} />}
       {printExam && <PrintExam exam={printExam} />}
     </div>
