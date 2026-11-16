@@ -12,9 +12,9 @@ import {
   sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, updateProfile
 } from "firebase/auth";
 import {
-  addDoc, collection, deleteDoc, doc, onSnapshot, setDoc
+  addDoc, collection, deleteDoc, deleteField, doc, onSnapshot, setDoc, updateDoc
 } from "firebase/firestore";
-import { deleteObject, ref, uploadBytes } from "firebase/storage";
+import { deleteObject, getBytes, ref, uploadBytes } from "firebase/storage";
 import { auth, db, firebaseReady, storage } from "./lib/firebase.js";
 import { callAi } from "./lib/ai.js";
 import { extractDocumentText } from "./lib/documents.js";
@@ -469,6 +469,10 @@ function App() {
   async function uploadFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
+    if (!user || !storage) {
+      notify("Sign in to save source documents securely to your library.", "error");
+      return;
+    }
     for (const file of files) {
       const extension = file.name.toLowerCase().split(".").pop();
       const limit = extension === "doc" ? 3_000_000 : 10_000_000;
@@ -480,31 +484,95 @@ function App() {
         notify(`${file.name}: this file is above the ${extension === "doc" ? "3 MB" : "10 MB"} upload limit.`, "error");
         continue;
       }
+      const uploadedPaths = [];
       try {
-        const text = await extractDocumentText(file);
-        if (!text.trim()) throw new Error("No readable text was found in this file.");
-        const id = crypto.randomUUID();
-        let storagePath = "";
-        if (user && storage) {
-          storagePath = `users/${user.uid}/documents/${id}-${safeFileName(file.name)}`;
-          await uploadBytes(ref(storage, storagePath), file, { contentType: file.type || "application/octet-stream" });
+        notify(`Reading ${file.name}…`, "info");
+        const extracted = await extractDocumentText(file);
+        const needsOcr = extension === "pdf" && !extracted.hasSelectableText;
+        const text = needsOcr ? "" : extracted.text;
+        const { pageCount, unreadablePages } = extracted;
+        if (!text.trim() && !needsOcr) {
+          throw new Error(extension === "pdf"
+            ? "No selectable text was found. This PDF may be scanned; run OCR on it, then upload the searchable PDF."
+            : "No readable text was found in this file.");
         }
+        const id = crypto.randomUUID();
+        const storagePath = `users/${user.uid}/documents/${id}-${safeFileName(file.name)}`;
+        const textStoragePath = `users/${user.uid}/documents/${id}.txt`;
+        await uploadBytes(ref(storage, storagePath), file, { contentType: file.type || "application/octet-stream" });
+        uploadedPaths.push(storagePath);
+        await uploadBytes(
+          ref(storage, textStoragePath),
+          new Blob([text], { type: "text/plain;charset=utf-8" }),
+          { contentType: "text/plain;charset=utf-8" }
+        );
+        uploadedPaths.push(textStoragePath);
         const entry = {
           id, name: file.name, type: extension.toUpperCase(), size: file.size,
-          storagePath, text, createdAt: Date.now(), pages: null
+          storagePath, textStoragePath, charCount: text.length, pageCount,
+          unreadablePages, extractionStatus: needsOcr ? "needs_ocr" : unreadablePages ? "partial" : "ready",
+          textPreview: text.slice(0, 280), createdAt: Date.now()
         };
         await saveToCollection("documents", id, entry);
-        notify(`${file.name} is ready to use.`, "success");
+        notify(needsOcr
+          ? `${file.name} is saved, but it has no selectable text. Upload a searchable/OCR copy to study from it.`
+          : unreadablePages
+            ? `${file.name} is saved, but ${unreadablePages} PDF page(s) contain no selectable text.`
+          : `${file.name} is fully indexed and ready to use.`, needsOcr || unreadablePages ? "info" : "success");
       } catch (error) {
+        await Promise.allSettled(uploadedPaths.map((path) => deleteObject(ref(storage, path))));
         notify(`${file.name}: ${error.message || "could not be uploaded."}`, "error");
       }
+    }
+  }
+
+  async function reprocessDocument(item, { notifyUser = true } = {}) {
+    if (!user || !storage || !item.storagePath) {
+      throw new Error("The original file is unavailable. Upload it again to extract the complete text.");
+    }
+    if (notifyUser) notify(`Re-reading ${item.name}…`, "info");
+    const bytes = await getBytes(ref(storage, item.storagePath), 10_000_000);
+    const mimeType = item.type === "PDF" ? "application/pdf" : item.type === "DOCX"
+      ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      : "application/msword";
+    const file = new File([bytes], item.name, { type: mimeType });
+    const extracted = await extractDocumentText(file);
+    if (!extracted.hasSelectableText) {
+      throw new Error("No selectable text was found. This PDF may be scanned; run OCR on it, then upload the searchable PDF.");
+    }
+    const textStoragePath = `users/${user.uid}/documents/${item.id}.txt`;
+    await uploadBytes(
+      ref(storage, textStoragePath),
+      new Blob([extracted.text], { type: "text/plain;charset=utf-8" }),
+      { contentType: "text/plain;charset=utf-8" }
+    );
+    await updateDoc(doc(db, "users", user.uid, "documents", item.id), {
+      textStoragePath,
+      charCount: extracted.text.length,
+      pageCount: extracted.pageCount,
+      unreadablePages: extracted.unreadablePages,
+      extractionStatus: extracted.unreadablePages ? "partial" : "ready",
+      textPreview: extracted.text.slice(0, 280),
+      text: deleteField()
+    });
+    if (notifyUser) notify(`${item.name} was re-read from the original file.`);
+    return { ...item, ...extracted, textStoragePath, charCount: extracted.text.length };
+  }
+
+  async function ensureFullTextAvailable(selected) {
+    const needsReprocessing = selected.filter((item) => !item.textStoragePath && item.storagePath);
+    for (const item of needsReprocessing) await reprocessDocument(item, { notifyUser: false });
+    const missingOriginal = selected.find((item) => !item.textStoragePath && !item.storagePath);
+    if (missingOriginal) {
+      throw new Error(`The original file for “${missingOriginal.name}” is unavailable. Upload it again to use the complete text.`);
     }
   }
 
   async function removeDocument(item) {
     try {
       if (user) {
-        if (item.storagePath) await deleteObject(ref(storage, item.storagePath));
+        const paths = [item.storagePath, item.textStoragePath].filter(Boolean);
+        await Promise.allSettled(paths.map((path) => deleteObject(ref(storage, path))));
         await deleteDoc(doc(db, "users", user.uid, "documents", item.id));
       } else {
         setDocuments((current) => current.filter((documentItem) => documentItem.id !== item.id));
@@ -515,18 +583,18 @@ function App() {
 
   async function createExam(form, sourceIds) {
     const selected = documents.filter((item) => sourceIds.includes(item.id));
-    const sourceText = selected.map((item) => `SOURCE: ${item.name}\n${item.text}`).join("\n\n").slice(0, 26000);
     try {
       let generated;
       if (demo) {
         generated = sampleGeneratedExam(form);
         notify("Sample questions added. Connect Firebase and OpenAI for a source-based exam.", "info");
       } else {
+        await ensureFullTextAvailable(selected);
         const result = await callAi({
           action: "generate-exam", topic: form.topic, subject: form.subject,
           questionCount: Number(form.questionCount), durationMinutes: Number(form.durationMinutes),
           difficulty: form.difficulty, cognitiveFocus: form.cognitiveFocus,
-          questionType: form.questionType, language: form.language, sourceText
+          questionType: form.questionType, language: form.language, sourceDocumentIds: sourceIds
         });
         generated = result.exam;
       }
@@ -555,9 +623,9 @@ function App() {
 
   async function askTutor(question, sourceIds) {
     const selected = documents.filter((item) => sourceIds.includes(item.id));
-    const sourceText = selected.map((item) => `SOURCE: ${item.name}\n${item.text}`).join("\n\n").slice(0, 26000);
     if (demo) return `This is the sample workspace. Your question was: “${question}”\n\nConnect Firebase and add an OpenAI server key in Vercel to ask the tutor questions about your documents. In the full workspace, iTest will explain the concept and separate what your source says from additional context.`;
-    const result = await callAi({ action: "study", question, sourceText, language: "English" });
+    await ensureFullTextAvailable(selected);
+    const result = await callAi({ action: "study", question, sourceDocumentIds: sourceIds, language: "English" });
     return result.answer;
   }
 
@@ -689,7 +757,7 @@ function App() {
           {user && !demo && !profileType ? <ProfileSetup user={user} onComplete={(type) => { setProfileType(type); setIsEducator(type === "educator"); setIsEmployer(type === "employer"); setSection(type === "educator" || type === "employer" ? "educator" : "overview"); }} notify={notify} /> : <>
           {section === "assigned" && user && profileType === "student" && <StudentWorkspace user={user} onCreateExam={() => openExamBuilder("practice")} notify={notify} />}
           {section === "educator" && (isEducator || isEmployer) && user && <EducatorWorkspace user={user} exams={exams} workspaceKind={profileType === "employer" ? "employer" : "educator"} onCreateExam={() => openExamBuilder("educator")} notify={notify} />}
-          {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} />}
+          {section === "library" && <DocumentLibrary documents={documents} onUpload={uploadFiles} onRemove={removeDocument} onReprocess={(item) => reprocessDocument(item).catch((error) => notify(error.message || "Could not re-read this document.", "error"))} canReprocess={Boolean(user && storage)} />}
           {section === "study" && <StudyDesk documents={documents} onAsk={askTutor} notify={notify} />}
           {section === "practice" && <ExamRoom exams={matchingExams} activeExam={activeExam} session={examSession} setSession={setExamSession} onCreate={() => setSection("create")} onStart={(exam) => { setActiveExam(exam); setExamSession({ exam, answers: {}, remainingSeconds: (Number(exam.durationMinutes) || 20) * 60, finished: false }); }} onSubmit={() => finishExam(examSession)} onExport={exportExam} />}
           </>}
@@ -775,8 +843,14 @@ function CreateExam({ documents, onUpload, onGenerate, notify }) {
   );
 }
 
-function DocumentLibrary({ documents, onUpload, onRemove }) {
+function DocumentLibrary({ documents, onUpload, onRemove, onReprocess, canReprocess }) {
   const [dragging, setDragging] = useState(false);
+  const [reprocessingId, setReprocessingId] = useState("");
+  async function reprocess(item) {
+    setReprocessingId(item.id);
+    try { await onReprocess(item); }
+    finally { setReprocessingId(""); }
+  }
   return (
     <div className="library-page">
       <PageHeading eyebrow="YOUR LIBRARY / 04" title="Keep your sources close." text="Store the material you study from, then bring it into a new exam when you’re ready." />
@@ -785,9 +859,27 @@ function DocumentLibrary({ documents, onUpload, onRemove }) {
         <span className="upload-drop-icon"><CloudUpload size={24} /></span><strong>Drop a document here, or <span>browse files</span></strong><small>PDF, DOC, or DOCX · up to 10 MB per file (legacy DOC: 3 MB)</small>
       </label>
       <section className="library-list-card"><div className="card-heading"><div><span className="eyebrow">SOURCE MATERIAL</span><h3>{documents.length} {documents.length === 1 ? "document" : "documents"}</h3></div><span className="library-count">{documents.length.toString().padStart(2, "0")}</span></div>
-        {documents.length ? <div className="document-table"><div className="document-table-head"><span>NAME</span><span>TYPE</span><span>ADDED</span><span>SIZE</span><span /></div>{documents.map((item) => <div className="document-row" key={item.id}><span className="document-name"><span className="file-icon"><FileText size={17} /></span><strong>{item.name}</strong></span><span className="doc-type">{item.type}</span><span>{formatDate(item.createdAt)}</span><span>{(Number(item.size || 0) / 1024).toFixed(0)} KB</span><button className="icon-button delete-button" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`}><Trash2 size={16} /></button></div>)}</div> : <EmptyState title="Your library is ready" text="Add course notes, reading materials, or a study guide to get started." />}
+        {documents.length ? <div className="document-table"><div className="document-table-head"><span>NAME</span><span>TYPE</span><span>ADDED</span><span>EXTRACTED TEXT</span><span /></div>{documents.map((item) => {
+          const characterCount = Number(item.charCount || item.text?.length || 0);
+          const needsReprocess = !item.textStoragePath;
+          const needsOcr = item.extractionStatus === "needs_ocr";
+          const isPartial = needsOcr || Number(item.unreadablePages || 0) > 0;
+          return <div className="document-row" key={item.id}>
+            <span className="document-name"><span className="file-icon"><FileText size={17} /></span><strong title={item.name}>{item.name}</strong></span>
+            <span className="doc-type">{item.type}</span>
+            <span>{formatDate(item.createdAt)}</span>
+            <span className={`doc-read-state ${isPartial ? "doc-read-partial" : ""}`} title={isPartial ? `${item.unreadablePages} PDF page(s) had no selectable text; they may be blank or scanned.` : `${(Number(item.size || 0) / 1024).toFixed(0)} KB file size`}>
+              {characterCount.toLocaleString()} chars{item.pageCount ? ` · ${item.pageCount} pages` : ""}
+              {needsOcr ? <small>Upload searchable/OCR copy</small> : isPartial ? <small>{item.unreadablePages} page(s) have no text</small> : needsReprocess ? <small>Re-read for full text</small> : null}
+            </span>
+            <span className="doc-actions">
+              {canReprocess && !needsOcr && <button className="doc-reprocess-button" disabled={reprocessingId === item.id} onClick={() => reprocess(item)}>{reprocessingId === item.id ? "Reading…" : needsReprocess ? "Re-read" : "Refresh"}</button>}
+              <button className="icon-button delete-button" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`}><Trash2 size={16} /></button>
+            </span>
+          </div>;
+        })}</div> : <EmptyState title="Your library is ready" text="Add course notes, reading materials, or a study guide to get started." />}
       </section>
-      <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Your study materials stay private.</strong> Signed-in users can only access files in their own account.</span></div>
+      <div className="privacy-note"><ShieldCheck size={16} /><span><strong>Your study materials stay private.</strong> Astra reads only the documents you select for a study or exam request. Signed-in users can only access files in their own account.</span></div>
     </div>
   );
 }
@@ -809,7 +901,7 @@ function StudyDesk({ documents, onAsk, notify }) {
   return (
     <div className="study-page">
       <PageHeading eyebrow="STUDY DESK / 03" title="Stay curious." text="Ask a question, clarify an idea, or work through your course material." />
-      <div className="study-layout"><section className="tutor-card"><div className="tutor-header"><div className="tutor-avatar"><Sparkles size={20} /></div><div><span className="eyebrow">iTEST STUDY GUIDE</span><h2>What are you working through?</h2></div><span className="online-mark"><i /> READY</span></div><form onSubmit={submit}><label className="tutor-input-label" htmlFor="tutor-question">Ask a question or name a concept</label><textarea id="tutor-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="e.g. How does cellular respiration relate to photosynthesis?" rows={4} /><div className="tutor-controls"><label className="tutor-source-select"><BookMarked size={15} /><select value={sourceIds[0] || ""} onChange={(event) => setSourceIds(event.target.value ? [event.target.value] : [])}><option value="">General knowledge</option>{documents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><ChevronDown size={13} /></label><button className="button button-dark" disabled={busy || !question.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Send size={15} />} Ask iTest</button></div></form>
+      <div className="study-layout"><section className="tutor-card"><div className="tutor-header"><div className="tutor-avatar"><Sparkles size={20} /></div><div><span className="eyebrow">iTEST STUDY GUIDE</span><h2>What are you working through?</h2></div><span className="online-mark"><i /> READY</span></div><form onSubmit={submit}><label className="tutor-input-label" htmlFor="tutor-question">Ask a question or name a concept</label><textarea id="tutor-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="e.g. How does cellular respiration relate to photosynthesis?" rows={4} /><div className="tutor-controls"><details className="study-source-picker"><summary><BookMarked size={15} /><span>{sourceIds.length ? `${sourceIds.length} source${sourceIds.length === 1 ? "" : "s"} selected` : "General knowledge"}</span><ChevronDown size={13} /></summary><div className="study-source-options"><p>Select any documents Astra should use.</p>{documents.length ? documents.map((item) => <label key={item.id}><input type="checkbox" checked={sourceIds.includes(item.id)} onChange={() => setSourceIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span>{item.name}</span></label>) : <small>Add documents in My documents to study from your own material.</small>}{sourceIds.length > 0 && <button type="button" onClick={() => setSourceIds([])}>Clear selection</button>}</div></details><button className="button button-dark" disabled={busy || !question.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Send size={15} />} Ask iTest</button></div></form>
           {answer && <div className="tutor-answer"><span className="answer-label"><Sparkles size={14} /> A PLACE TO START</span><div>{answer.split("\n").map((line, index) => <p key={index}>{line || <br />}</p>)}</div><button className="text-link-small" onClick={() => { navigator.clipboard?.writeText(answer); notify("Answer copied."); }}>Copy answer</button></div>}
         </section><aside className="study-aside"><div className="study-aside-art"><span className="eyebrow">KEEP GOING</span><div className="study-orb"><div><BookOpen size={24} /></div></div><h3>Understanding<br />takes practice.</h3><p>Ask for an example, a simpler explanation, or a new way to look at a difficult idea.</p></div><div className="prompt-card"><span className="eyebrow">TRY A PROMPT</span>{["Explain this in simpler terms", "Give me a real-world example", "What should I review next?"].map((prompt) => <button key={prompt} onClick={() => setQuestion(prompt)}>{prompt}<ArrowUpRight size={14} /></button>)}</div></aside></div>
     </div>

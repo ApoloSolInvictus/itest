@@ -90,7 +90,9 @@ Each link uses a high-entropy random token and can be created independently for 
 
 ## Document handling
 
-PDF and DOCX text is extracted in the browser. Legacy binary DOC extraction is done by an authenticated Vercel function. The app limits stored extracted text to 26,000 characters per document; PDFs and DOCX files have a 10 MB upload limit, and legacy DOC files have a 3 MB limit. Only documents selected for a generation or study request are sent to OpenAI.
+PDF and DOCX text is extracted in the browser, across every PDF page. Legacy binary DOC extraction is done by an authenticated Vercel function. Original files and complete extracted text are stored separately in private Firebase Storage; Firestore keeps the document index, extraction status, and a short preview. Existing library entries without a full-text sidecar are re-read from their original file the first time they are used, and can also be refreshed from My documents.
+
+Signed-in users can select documents from the same private library in exam creation and Study & research, across their Student, Educator, or HR workspace. The AI API loads only the signed-in user's selected documents. It reads up to 20 documents and 600,000 extracted characters per request. Larger source collections should be split into chapters. Longer selections are analyzed section by section so later parts of a document are included instead of being silently dropped. Image-only/scanned PDF pages are identified as having no selectable text; iTest does not perform OCR itself. PDFs and DOCX files have a 10 MB upload limit, legacy DOC files have a 3 MB limit (and must remain within the server response size), and extracted text is capped at 9 MB per document to fit the existing private Storage rule.
 
 ## Data paths
 
@@ -98,5 +100,5 @@ PDF and DOCX text is extracted in the browser. Legacy binary DOC extraction is d
 - Creator Firestore: `users/{uid}/mailingLists/{listId}`, `users/{uid}/assignments/{assignmentId}`, `users/{uid}/assignments/{assignmentId}/results/{resultId}`, and `users/{uid}/studentResults/{resultId}`.
 - Student Firestore: invited exams are linked at `users/{studentUid}/assignedExams/{assignmentKey}`, with attempt history in its `attempts` subcollection. This workspace index contains no answer keys.
 - Public exam metadata: `publicExams/{shareId}` is available only through authenticated server functions, which omit answer keys from student responses. Enrollments and timed sessions are stored privately under each creator assignment and checked when a student submits.
-- Firebase Storage: `users/{uid}/documents/{fileName}`.
+- Firebase Storage: original files and extracted text sidecars in `users/{uid}/documents/{fileName}`; Firestore stores the path, size, page count, and extraction status.
 - Vercel Functions: `/api/profile` saves a one-time account profile; `/api/ai` and `/api/extract-doc` require a Firebase ID token; `/api/educator` requires an Educator/HR profile or a legacy custom claim; `/api/student` and the timed exam routes require a verified invited email. A per-instance request limit helps prevent accidental bursts.

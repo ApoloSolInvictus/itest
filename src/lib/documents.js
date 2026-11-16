@@ -1,6 +1,20 @@
 import { auth } from "./firebase.js";
 
-const MAX_TEXT_LENGTH = 26000;
+const MAX_EXTRACTED_BYTES = 9 * 1024 * 1024;
+
+function assertExtractedTextSize(text) {
+  if (new TextEncoder().encode(text).byteLength > MAX_EXTRACTED_BYTES) {
+    throw new Error("This document expands to more than 9 MB of text. Split it into smaller chapters and upload them separately.");
+  }
+}
+
+function collectPdfPageText(items) {
+  return items
+    .map((item) => `${item.str || ""}${item.hasEOL ? "\n" : " "}`)
+    .join("")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
 
 export async function extractDocumentText(file) {
   const name = file.name.toLowerCase();
@@ -12,20 +26,36 @@ export async function extractDocumentText(file) {
     pdfjs.GlobalWorkerOptions.workerSrc = workerModule.default;
     const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
     const pages = [];
-    for (let pageNumber = 1; pageNumber <= Math.min(pdf.numPages, 100); pageNumber += 1) {
+    let extractedBytes = 0;
+    let unreadablePages = 0;
+    let readableCharacterCount = 0;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
-      pages.push(content.items.map((item) => item.str || "").join(" "));
-      if (pages.join("\n").length > MAX_TEXT_LENGTH) break;
+      const pageText = collectPdfPageText(content.items);
+      if (!pageText) unreadablePages += 1;
+      readableCharacterCount += pageText.length;
+      const pageBlock = `--- Page ${pageNumber} ---\n${pageText}`;
+      extractedBytes += new TextEncoder().encode(pageBlock).byteLength;
+      if (extractedBytes > MAX_EXTRACTED_BYTES) {
+        throw new Error("This document expands to more than 9 MB of text. Split it into smaller chapters and upload them separately.");
+      }
+      pages.push(pageBlock);
     }
-    return pages.join("\n").slice(0, MAX_TEXT_LENGTH);
+    const text = pages.join("\n\n");
+    assertExtractedTextSize(text);
+    return { text, pageCount: pdf.numPages, unreadablePages, hasSelectableText: readableCharacterCount > 0 };
   }
+
   if (name.endsWith(".docx")) {
     const mammothModule = await import("mammoth/mammoth.browser");
     const mammoth = mammothModule.default || mammothModule;
     const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-    return result.value.slice(0, MAX_TEXT_LENGTH);
+    const text = String(result.value || "").trim();
+    assertExtractedTextSize(text);
+    return { text, pageCount: null, unreadablePages: 0, hasSelectableText: Boolean(text) };
   }
+
   if (name.endsWith(".doc")) {
     const user = auth?.currentUser;
     if (!user) throw new Error("Sign in with Firebase to extract legacy .doc files.");
@@ -43,7 +73,10 @@ export async function extractDocumentText(file) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "The Word document could not be read.");
-    return String(result.text || "").slice(0, MAX_TEXT_LENGTH);
+    const text = String(result.text || "").trim();
+    assertExtractedTextSize(text);
+    return { text, pageCount: null, unreadablePages: 0, hasSelectableText: Boolean(text) };
   }
+
   throw new Error("Choose a PDF, DOC, or DOCX file.");
 }
